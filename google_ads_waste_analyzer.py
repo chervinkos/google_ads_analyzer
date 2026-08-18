@@ -176,10 +176,14 @@ def format_currency(amount):
 
 def print_report(flagged, insufficient, window_label, min_clicks, min_cost):
     print(f"Report window: {window_label}")
+    print(f"Wasted Spend Report (min clicks: {min_clicks}, min cost: {format_currency(min_cost)})")
     print(
-        f"Wasted Spend Report (min clicks: {min_clicks}, "
-        f"min cost: {format_currency(min_cost)} "
-        f"[placeholder default - tune to your account's CPC/CPA])"
+        "  min-cost tradeoff: lower = more aggressive (catches waste earlier, "
+        "more false positives on terms that would've converted with more data);"
+    )
+    print(
+        "  higher = more conservative (fewer false positives, but waste sits "
+        "longer before being caught)"
     )
 
     if not flagged:
@@ -224,27 +228,47 @@ def write_output_csv(path, flagged):
             )
 
 
+MIN_COST_HELP = """Cost-based flagging threshold (required - no default). A zero-conversion
+term at or above this cost is flagged regardless of click count,
+overriding --min-clicks.
+
+There is no single agreed number for this in PPC practice - pick a
+philosophy deliberately rather than trusting an arbitrary figure:
+
+  Aggressive   (~1/3 of your target CPA)
+               Catches waste earlier. Accepts more false positives -
+               may flag terms that would've converted given more
+               time/data.
+
+  Conservative (~2-3x your target CPA)
+               Lets terms accumulate more data before flagging.
+               Fewer false positives, but waste sits longer before
+               being caught.
+
+  Example: non-branded target CPA of 77.6 (any currency) works out to
+  roughly 25-30 aggressive vs. 150-230 conservative. Illustrative
+  reference points only, not defaults - base yours on your own CPA."""
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Flag wasted spend (cost with zero conversions) in a Google Ads Search Terms report.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument("input_csv", help="Path to the Search Terms report CSV (~90-day export).")
     parser.add_argument(
         "--min-clicks",
         type=int,
         default=3,
-        help="Data-sufficiency floor and click-based flagging threshold. Zero-conversion "
-        "terms below this click count are reported as insufficient data instead of flagged, "
-        "unless --min-cost is cleared.",
+        help="Data-sufficiency floor and click-based flagging threshold (default: 3).\n"
+        "Zero-conversion terms below this click count are reported as insufficient\n"
+        "data instead of flagged, unless --min-cost is cleared.",
     )
     parser.add_argument(
         "--min-cost",
         type=float,
-        default=20.0,
-        help="Cost-based flagging threshold. UNVALIDATED PLACEHOLDER - tune this to your "
-        "account's actual average CPC/CPA before relying on it. A zero-conversion term at or "
-        "above this cost is flagged regardless of click count, overriding --min-clicks.",
+        required=True,
+        help=MIN_COST_HELP,
     )
     parser.add_argument(
         "--date-range",
