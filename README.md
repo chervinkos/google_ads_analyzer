@@ -1,1 +1,1 @@
-# Claude-code-first-sandbox
+# google-ads-analyzer
