@@ -1,0 +1,47 @@
+project_name: meest-post-polska
+aliases: ["Meest Post Polska", "Poland", "PL", "Meest PL"]
+
+client_account_id: 2732587797
+
+primary_conversion_name: "Parcels"
+
+thresholds:
+  min_clicks: 2
+  min_cost: 20
+
+# Clusters are matched by campaign name, top to bottom, first match wins.
+clusters:
+  - name: brand
+    match_campaign_name: ["search-brand", "brand"]
+    description: >
+      Branded terms — audience already aware of Meest as a company,
+      not destination-specific. Evaluated separately from destination
+      performance since it reflects warm/returning audience behavior.
+
+  - name: PL-UA
+    match_campaign_name: ["ukraina", "ua"]
+
+  - name: PL-US
+    match_campaign_name: ["usa", "us"]
+
+  - name: PL-UK
+    match_campaign_name: ["uk", "wielka brytania"]
+
+  - name: PL-DE
+    match_campaign_name: ["niemcy", "de", "germany"]
+
+  - name: krajowe
+    match_campaign_name: ["krajowe", "domestic"]
+
+  - name: international
+    match_campaign_name: "catch-all"   # anything not matched above
+
+# Used for search-term-level brand detection (content matching),
+# independent of which campaign the term currently lives in —
+# feeds the pattern-seeking / re-homing suggestion stage.
+brand_keywords:
+  - meest
+  - міст
+  - мист
+  - mist
+  - меест
