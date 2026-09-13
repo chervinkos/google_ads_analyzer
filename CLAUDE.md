@@ -1,44 +1,69 @@
-# CLAUDE.md — Meest Google Ads Waste Analyzer
+# CLAUDE.md — Google Ads Analysis Toolkit
 
 ## Project purpose
-This repo analyzes Google Ads search-term data to flag wasted spend
-(high cost / low or zero conversions) and outputs actionable results.
+This repo analyzes Google Ads account data — search-term waste,
+campaign/cohort performance, and related reporting — for any
+connected client account. Account-specific facts (IDs, thresholds,
+cluster definitions) live in `configs/`, never in this file or in
+the scripts themselves.
 
-## Account context
-- Client account ID: 2732587797 (meestpost.com)
-- Access via: Google Ads MCP Connector (already connected in claude.ai)
-- MCC ID: 9372514694 (do not query directly — metrics only work on client accounts)
+## Config selection
+Each project/account has its own config file under `configs/`
+(e.g. `configs/meest-post-polska.yaml`).
 
-## Default parameters
-- Baseline window: 90 days
-- Trailing/flagging window: 30 days (minus ~7 days for conversion lag)
-- --min-clicks: 2 (default, configurable via CLI flag)
-- --min-cost: $20 (placeholder — not yet validated against real account
-  average CPC/CPA; treat as tunable, not fixed)
-- Cost-based flags override the click floor (a term can be flagged on
-  cost alone even with fewer clicks than --min-clicks)
+- If exactly **one** config file exists, use it automatically —
+  no need to ask.
+- If **multiple** config files exist, ask the user which project to
+  use, matching against each config's `project_name` and `aliases`
+  fields (not just the filename).
+- Never guess or default silently when more than one config exists.
+
+## What belongs in a config vs. what's discovered live
+- **Config (business judgment, not inferable):** client account ID,
+  primary conversion name, cost/click thresholds, cluster
+  definitions and match rules, brand keywords.
+- **Live via MCP (never hardcoded, always queried fresh):** account
+  currency, timezone, campaign list, available conversion actions,
+  account name.
+
+## Access
+- Google Ads data via the Google Ads MCP Connector (already connected
+  in claude.ai)
+- Manager (MCC) accounts cannot be queried directly for metrics —
+  always resolve to the actual client account ID from the active
+  config
 
 ## Output conventions
-- Always save flagged results to CSV (sorted by cost descending)
-- Report "insufficient data" terms (below click floor, not cost-flagged)
-  separately — never silently drop them
+- Always save flagged/analyzed results to CSV (sorted by cost
+  descending, unless a report type specifies otherwise)
+- Report "insufficient data" items separately — never silently
+  drop them
 - Label every report with the actual date range analyzed
+- For narrative-style reports: state period vs. comparison period
+  explicitly, and structure output as: what changed → observed/
+  expected impact → what's working → recommended next steps
+  (scale / cut / edit / launch)
 
-## Known technical notes
-- Google Ads search-term exports may have extra header/title rows —
-  detect the real header row, don't assume row 0
-- Handle Google's "--" placeholder as 0, strip currency symbols/commas
+## Known technical notes (Google Ads data handling)
+- Search-term exports may include extra header/title rows — detect
+  the real header row, never assume row 0
+- Handle Google's "--" placeholder as 0; strip currency symbols and
+  thousands separators from numeric fields
 - Search terms need joining from ad_group → campaign name; some ad
-  groups may not appear in the initial batch pull and need a follow-up
-  fetch
+  groups may be missing from an initial batch pull and require a
+  follow-up fetch
+- Cluster matching (from config) is first-match-wins, top to bottom,
+  with an explicit catch-all cluster for anything unmatched
+- Brand-term detection is separate from campaign-based cluster
+  matching — a term can live in a non-brand campaign but still match
+  brand_keywords content-wise; this feeds pattern-seeking/re-homing
+  suggestions, not just campaign-based grouping
 
-## Workflow
-1. Pull campaign + search-term data for the client account via MCP
-2. Map ad groups to campaign names
-3. Build CSV in the format the analyzer expects
-4. Run `analyze_wasted_spend.py` on it
-5. Save flagged output as CSV, present it to the user
+## Scripts
+- `analyze_wasted_spend.py` — search-term waste analysis
+  (`--config configs/<project>.yaml [--min-clicks N] [--min-cost N] [--output file.csv]`)
+- (additional analysis scripts to be added here as they're built)
 
-## Script reference
-- Main analyzer: `analyze_wasted_spend.py`
-- CLI shape: `python analyze_wasted_spend.py --input search_terms.csv --min-clicks 2 --min-cost 20 [--output flagged.csv]`
+## Slash commands
+- `/analyze-waste` — runs the full waste-analysis pipeline end-to-end
+  using the active config's defaults, with inline overrides supported
