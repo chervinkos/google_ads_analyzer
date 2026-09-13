@@ -45,3 +45,12 @@ brand_keywords:
   - мист
   - mist
   - меест
+
+# Used for search-term-level intent/service detection — separate
+# axis from geographic clusters (a term can be, e.g., PL-UA *and*
+# business-shipping at the same time).
+intent_keywords:
+  - name: business-shipping
+    match: ["firmowa", "firmowe", "biznes", "hurtowa", "b2b"]
+  - name: document-shipping
+    match: ["dokument", "dokumenty", "listy", "koperta"]
