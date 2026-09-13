@@ -61,9 +61,18 @@ Each project/account has its own config file under `configs/`
 
 ## Scripts
 - `analyze_wasted_spend.py` — search-term waste analysis
-  (`--config configs/<project>.yaml [--min-clicks N] [--min-cost N] [--output file.csv]`)
+  (`--config configs/<project>.yaml --input file.csv [--min-clicks N] [--min-cost N] [--output file.csv]`)
+- `analyze_search_opportunities.py` — search-term opportunity/pattern
+  discovery: new-demand, intent-pattern, underexploited high-performer,
+  and rising-trend signals
+  (`--config configs/<project>.yaml --trailing file.csv --baseline file.csv --keywords file.csv [--output file.csv]`)
+- `ads_common.py` — shared helpers (header-row detection, numeric
+  cleanup, cluster/brand/intent matching) used by the scripts above
 - (additional analysis scripts to be added here as they're built)
 
 ## Slash commands
 - `/analyze-waste` — runs the full waste-analysis pipeline end-to-end
   using the active config's defaults, with inline overrides supported
+- `/find-opportunities` — runs the full opportunity-discovery pipeline
+  end-to-end using the active config's defaults, with inline overrides
+  supported
