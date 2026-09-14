@@ -11,12 +11,15 @@ thresholds:
 
 # Clusters are matched by campaign name, top to bottom, first match wins.
 # Patterns are regex (re.search, case-insensitive). Short geo-codes (ua, us,
-# uk, de) use (?<![A-Za-z])...(?![A-Za-z]) instead of \b: \b treats "_" as a
-# word character, so it fails to match e.g. "ua" inside "ua_pl" — this
+# uk, de, ger) use (?<![A-Za-z])...(?![A-Za-z]) instead of \b: \b treats "_"
+# as a word character, so it fails to match e.g. "ua" inside "ua_pl" — this
 # account's campaign names use "_", "/", "|", "[]" as delimiters, not just
 # spaces, so a plain \b boundary silently drops real campaigns. Verified
-# against a live pull of all 50 campaign names in the account (Search, PMax,
-# Display) on 2026-09-02.
+# against a live pull of the account's full campaign history (124 campaigns,
+# Search/PMax/Display/Demand Gen, all statuses) on 2026-09-14. Destinations
+# with no dedicated cluster here (Czech Republic, Netherlands, Italy, Canada)
+# fall to catch-all by design — adding clusters for them is a business-scope
+# decision, not a pattern fix, so it's left alone pending an explicit ask.
 clusters:
   - name: brand
     match_campaign_name: ["brand"]
@@ -39,10 +42,13 @@ clusters:
     match_campaign_name: ["(?<![A-Za-z])uk(?![A-Za-z])", "wielka brytania", "united kingdom"]
 
   - name: PL-DE
-    match_campaign_name: ["niem", "german", "(?<![A-Za-z])de(?![A-Za-z])"]
+    match_campaign_name: ["niem", "german", "(?<![A-Za-z])de(?![A-Za-z])", "(?<![A-Za-z])ger(?![A-Za-z])"]
     # "niem" (not "niemcy"/"niemiec") is the root common to this account's
     # actual spellings, including "Pmax | do Niemec" — its single biggest
     # campaign by spend, which the old "niemcy" pattern never matched at all.
+    # "ger" (boundary-anchored) catches a recurring "Promo-GER" naming
+    # pattern (5 campaigns) that "german"/"niem"/"de" all miss — found in
+    # the 2026-09-14 re-validation against the account's full campaign list.
 
   - name: krajowe
     match_campaign_name: ["krajow", "domestic"]
