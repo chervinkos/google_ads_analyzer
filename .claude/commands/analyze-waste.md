@@ -15,9 +15,19 @@ Pipeline:
    per CLAUDE.md's "Known technical notes" (cursor on `metrics.cost_micros`
    plus a tiebreaker) rather than assuming one batch is the full result.
    TODO: Performance Max campaigns are not covered by `search_term_view`
-   at all — merging in PMax search-term insight data (likely via
-   `campaign_search_term_insight`, confirmed with `metadata_get_resource_metadata`
-   first) is not yet implemented. Until this lands, PMax campaigns are
+   at all — it excludes PMax by design. PMax term-level data comes from
+   `campaign_search_term_view` instead (confirmed against the Search
+   terms report UI: real individual query text, "Performance Max" match
+   type, full cost/click/impression metrics — same shape as
+   `search_term_view`, not the separate category-aggregated
+   `campaign_search_term_insight` resource). Merging it in is a
+   straightforward union with the Search-campaign pull — same
+   term/cost/conversion shape, just sourced from two resources depending
+   on campaign type, no category-label handling needed. Still confirm
+   the exact field names on `campaign_search_term_view` with
+   `metadata_get_resource_metadata` before wiring up the fetch, the same
+   way cluster patterns were checked against real campaign names rather
+   than assumed. Until this merge is implemented, PMax campaigns are
    absent from waste analysis even though they may carry real spend —
    flag this explicitly in the summary presented to the user rather than
    silently omitting them.

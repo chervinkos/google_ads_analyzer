@@ -19,8 +19,11 @@ Pipeline:
    "Known technical notes" (cursor on `metrics.cost_micros` plus a
    tiebreaker) rather than assuming one batch is the full result.
    TODO: same PMax gap as `/analyze-waste` — `search_term_view` doesn't
-   cover Performance Max campaigns, so opportunity signals from PMax
-   traffic are currently missing; flag this in the summary rather than
+   cover Performance Max campaigns; PMax term-level data comes from
+   `campaign_search_term_view` instead (see `/analyze-waste` for the
+   resource details) and still needs merging in here too, for both the
+   trailing and baseline pulls. Until then, opportunity signals from
+   PMax traffic are missing; flag this in the summary rather than
    silently omitting it.
 2. Map ad groups to their campaign names for both search-term pulls
    (fetch any ad groups missing from the initial batch pull).
