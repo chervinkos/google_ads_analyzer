@@ -52,6 +52,19 @@ Each project/account has its own config file under `configs/`
 - Search terms need joining from ad_group → campaign name; some ad
   groups may be missing from an initial batch pull and require a
   follow-up fetch
+- The `search_search` MCP tool has no offset/page_token — it hard-caps
+  at whatever `limit` is passed, so a batch that comes back exactly at
+  `limit` may not be the full result set. Paginate with a cursor built
+  from the sort key itself: sort by `metrics.cost_micros DESC` plus a
+  unique tiebreaker (`search_term_view.resource_name` ASC) so row
+  order is deterministic, then after each batch add a condition using
+  the last row's cost value (`metrics.cost_micros <= <last row's
+  cost_micros>`, with a strictly-less-than comparison on the
+  tiebreaker field to exclude the row itself when costs are tied) to
+  fetch the next page. Repeat until a batch returns fewer rows than
+  `limit`. Write the full merged result straight to a file as it's
+  built — never print every row back into the conversation, only a
+  summary (row count, cost total, a handful of standout lines)
 - Cluster matching (from config) is first-match-wins, top to bottom,
   with an explicit catch-all cluster for anything unmatched
 - Brand-term detection is separate from campaign-based cluster

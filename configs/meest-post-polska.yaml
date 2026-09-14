@@ -10,28 +10,42 @@ thresholds:
   min_cost: 20
 
 # Clusters are matched by campaign name, top to bottom, first match wins.
+# Patterns are regex (re.search, case-insensitive). Short geo-codes (ua, us,
+# uk, de) use (?<![A-Za-z])...(?![A-Za-z]) instead of \b: \b treats "_" as a
+# word character, so it fails to match e.g. "ua" inside "ua_pl" — this
+# account's campaign names use "_", "/", "|", "[]" as delimiters, not just
+# spaces, so a plain \b boundary silently drops real campaigns. Verified
+# against a live pull of all 50 campaign names in the account (Search, PMax,
+# Display) on 2026-09-02.
 clusters:
   - name: brand
-    match_campaign_name: ["search-brand", "brand"]
+    match_campaign_name: ["brand"]
     description: >
       Branded terms — audience already aware of Meest as a company,
       not destination-specific. Evaluated separately from destination
       performance since it reflects warm/returning audience behavior.
 
   - name: PL-UA
-    match_campaign_name: ["ukraina", "ua"]
+    match_campaign_name: ["ukrain", "україн", "(?<![A-Za-z])ua(?![A-Za-z])"]
+    # "ukrain" (not "ukraina") catches both the Polish ("Ukraina") and
+    # English ("Ukraine") spellings — the old "ukraina"-only pattern let
+    # English-spelled campaigns (e.g. "Search-Ukraine") fall through to
+    # PL-UK, since "uk" is literally the first two letters of "ukraine".
 
   - name: PL-US
-    match_campaign_name: ["usa", "us"]
+    match_campaign_name: ["(?<![A-Za-z])usa(?![A-Za-z])", "(?<![A-Za-z])us(?![A-Za-z])"]
 
   - name: PL-UK
-    match_campaign_name: ["uk", "wielka brytania"]
+    match_campaign_name: ["(?<![A-Za-z])uk(?![A-Za-z])", "wielka brytania", "united kingdom"]
 
   - name: PL-DE
-    match_campaign_name: ["niemcy", "de", "germany"]
+    match_campaign_name: ["niem", "german", "(?<![A-Za-z])de(?![A-Za-z])"]
+    # "niem" (not "niemcy"/"niemiec") is the root common to this account's
+    # actual spellings, including "Pmax | do Niemec" — its single biggest
+    # campaign by spend, which the old "niemcy" pattern never matched at all.
 
   - name: krajowe
-    match_campaign_name: ["krajowe", "domestic"]
+    match_campaign_name: ["krajow", "domestic"]
 
   - name: international
     match_campaign_name: "catch-all"   # anything not matched above

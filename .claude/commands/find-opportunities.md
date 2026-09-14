@@ -14,6 +14,14 @@ Pipeline:
    - a baseline-window search-term report immediately preceding it
      (default: the 30 days before the trailing window)
    - the current active keyword list for the account
+
+   `search_search` has no offset/page_token — paginate per CLAUDE.md's
+   "Known technical notes" (cursor on `metrics.cost_micros` plus a
+   tiebreaker) rather than assuming one batch is the full result.
+   TODO: same PMax gap as `/analyze-waste` — `search_term_view` doesn't
+   cover Performance Max campaigns, so opportunity signals from PMax
+   traffic are currently missing; flag this in the summary rather than
+   silently omitting it.
 2. Map ad groups to their campaign names for both search-term pulls
    (fetch any ad groups missing from the initial batch pull).
 3. Build three CSVs from the pulled data: trailing search terms, baseline

@@ -11,7 +11,16 @@ Pipeline:
    `client_account_id`. Pull campaign and search-term data for that
    account via the Google Ads MCP Connector, using the default 90-day
    baseline window (unless the user specifies a different window in
-   their request).
+   their request). `search_search` has no offset/page_token — paginate
+   per CLAUDE.md's "Known technical notes" (cursor on `metrics.cost_micros`
+   plus a tiebreaker) rather than assuming one batch is the full result.
+   TODO: Performance Max campaigns are not covered by `search_term_view`
+   at all — merging in PMax search-term insight data (likely via
+   `campaign_search_term_insight`, confirmed with `metadata_get_resource_metadata`
+   first) is not yet implemented. Until this lands, PMax campaigns are
+   absent from waste analysis even though they may carry real spend —
+   flag this explicitly in the summary presented to the user rather than
+   silently omitting them.
 2. Map ad groups to their campaign names (fetch any ad groups missing
    from the initial batch pull — some may not come back in the first
    pull and need a follow-up fetch).

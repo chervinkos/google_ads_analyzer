@@ -152,9 +152,15 @@ def is_missing(value):
 
 
 def match_cluster(campaign_name, clusters):
-    """First-match-wins cluster assignment by campaign-name substring match,
-    falling back to the config's catch-all cluster."""
-    name_lower = (campaign_name or "").lower()
+    """First-match-wins cluster assignment by campaign-name regex match,
+    falling back to the config's catch-all cluster.
+
+    Patterns are regex (re.search, case-insensitive), so plain-word patterns
+    already in configs keep working unchanged (a plain word is a valid regex
+    that matches itself as a substring), while patterns can now also use
+    real regex features like \\b word boundaries and character classes.
+    """
+    name = campaign_name or ""
     catch_all = None
     for cluster in clusters:
         match = cluster.get("match_campaign_name")
@@ -163,14 +169,14 @@ def match_cluster(campaign_name, clusters):
             continue
         patterns = match if isinstance(match, list) else [match]
         for pattern in patterns:
-            if pattern and pattern.lower() in name_lower:
+            if pattern and re.search(pattern, name, re.IGNORECASE):
                 return cluster["name"]
     return catch_all or "unclustered"
 
 
 def matches_any_keyword(text, keywords):
-    text_lower = (text or "").lower()
-    return any(kw.lower() in text_lower for kw in keywords)
+    text = text or ""
+    return any(kw and re.search(kw, text, re.IGNORECASE) for kw in keywords)
 
 
 def match_intents(text, intent_keywords):
