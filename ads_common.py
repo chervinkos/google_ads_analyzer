@@ -115,7 +115,13 @@ def _normalize_decimal_separator(text):
 
     last_idx = text.rfind(sep_char)
     frac_len = len(text) - last_idx - 1
-    if frac_len in (1, 2) and text.count(sep_char) == 1:
+    # A real thousands grouping always leaves exactly 3 digits in the last
+    # group (e.g. "1.234" = 1234). Any other length past the final separator
+    # is a decimal fraction, not a thousands group - this matters for fields
+    # like metrics.conversions, which can carry many fractional digits
+    # (fractional attribution, e.g. "16.348877") well past the 1-2 digits
+    # typical of currency amounts.
+    if frac_len != 3 and text.count(sep_char) == 1:
         return text.replace(sep_char, ".")
     # Otherwise it's a thousands separator (possibly repeated) - drop it.
     return text.replace(sep_char, "")
