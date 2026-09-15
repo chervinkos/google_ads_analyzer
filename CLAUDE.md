@@ -55,16 +55,28 @@ Each project/account has its own config file under `configs/`
 - The `search_search` MCP tool has no offset/page_token — it hard-caps
   at whatever `limit` is passed, so a batch that comes back exactly at
   `limit` may not be the full result set. Paginate with a cursor built
-  from the sort key itself: sort by `metrics.cost_micros DESC` plus a
-  unique tiebreaker (`search_term_view.resource_name` ASC) so row
-  order is deterministic, then after each batch add a condition using
+  from the sort key itself: sort by `metrics.cost_micros DESC` (the
+  resource's own `.resource_name` field is usually NOT a valid
+  `ORDER BY` field per the Google Ads API — confirmed for
+  `search_term_view`; use the resource's own text field, e.g.
+  `search_term_view.search_term ASC`, as the secondary sort instead,
+  and check `metadata_get_resource_metadata`'s `sortable` list before
+  assuming any field works). After each batch, add a condition using
   the last row's cost value (`metrics.cost_micros <= <last row's
-  cost_micros>`, with a strictly-less-than comparison on the
-  tiebreaker field to exclude the row itself when costs are tied) to
-  fetch the next page. Repeat until a batch returns fewer rows than
-  `limit`. Write the full merged result straight to a file as it's
-  built — never print every row back into the conversation, only a
-  summary (row count, cost total, a handful of standout lines)
+  cost_micros>`) to fetch the next page. Because `search_search`'s
+  `conditions` only combine with AND (no OR), there's no single-query
+  way to exclude just the tied boundary row, so successive pages will
+  overlap on cost ties — dedupe locally by the row's `.resource_name`
+  field (selectable even when not sortable) as pages are merged, not
+  server-side. Repeat until a batch returns fewer rows than `limit`.
+  Write the full merged result straight to a file as it's built —
+  never print every row back into the conversation, only a summary
+  (row count, cost total, a handful of standout lines). In practice,
+  accounts with a long tail of high-click/near-zero-CPC terms can take
+  many pages (7+ seen for one 90-day pull) — if resource constraints
+  force a cutoff before reaching a final partial batch, report the
+  cost floor actually reached and the total captured rather than
+  silently presenting a partial pull as complete
 - Cluster matching (from config) is first-match-wins, top to bottom,
   with an explicit catch-all cluster for anything unmatched
 - Brand-term detection is separate from campaign-based cluster
