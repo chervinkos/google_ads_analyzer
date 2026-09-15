@@ -45,6 +45,50 @@ Each project/account has its own config file under `configs/`
   (scale / cut / edit / launch)
 
 ## Known technical notes (Google Ads data handling)
+- Always filter by `metrics.impressions > 0` at the query level (not
+  post-processing) for campaign, ad group, keyword, and search-term
+  pulls — unless a task specifically needs zero-activity entities (e.g.
+  auditing paused/never-served keywords). This keeps pagination cursors
+  moving through real active-period data instead of burning pages/
+  connector calls on placeholder or inactive rows. Search-term reports
+  already require impressions > 0 implicitly (a term can't appear
+  without at least one impression), so this rule mainly matters for
+  other entity types — `campaign`, `ad_group`, `ad_group_criterion`,
+  `keyword_view`, etc.
+- `campaign_search_term_view` (used to backfill Performance Max search
+  terms, since `search_term_view` excludes PMax by design) is **not
+  PMax-exclusive** — it returns search-term rows for every campaign
+  type, Search included. Confirmed on a live pull (2026-09-15): 959 of
+  2,919 rows from an unfiltered `campaign_search_term_view` query were
+  duplicate Search-campaign data already covered by `search_term_view`.
+  The resource has no `campaign.advertising_channel_type` field of its
+  own — `metadata_get_resource_metadata` shows only
+  `campaign_search_term_view.*`, `metrics.*`, and `segments.*` as
+  selectable/filterable — so the channel-type filter can't happen in
+  the same query. Two-step fix: first query the `campaign` resource for
+  `campaign.advertising_channel_type = 'PERFORMANCE_MAX'` to get the
+  account's PMax campaign resource names, then filter
+  `campaign_search_term_view.campaign IN (<those resource names>)`
+  before merging into a Search-campaign pull. Never merge
+  `campaign_search_term_view` rows in unfiltered — it double-counts
+  Search-campaign spend.
+- PMax click-tail sizing (2026-09-15 investigation, meest-post-polska):
+  a live, complete (non-truncated — no batch hit the query `limit`)
+  pull of `campaign_search_term_view` for this account's 39 PMax
+  campaigns over a 90-day window (2026-06-17–2026-09-14, filtered per
+  the gotcha above) found 3,610 rows with clicks 1–3, totaling
+  13,125.71 PLN, vs. 475 rows / 17,754.38 PLN for clicks ≥4 (30,880.09
+  PLN combined). The 1–3-click tail is ~88% of rows but ~43% of PMax
+  search-term cost in this window — a real fraction, not noise.
+  Individual row cost in this tail ranged 0.00–79.10 PLN. Treat any
+  partial/paginated PMax pull's reported total as a **floor**, not a
+  final number: the actual gap depends on where that pull's pagination
+  stopped, and could run as high as the full tail total above if the
+  cutoff landed before reaching this low-cost range. Don't assert a
+  click-tail gap is immaterial without recomputing it this way — confirm
+  pagination actually reached a final partial batch (one returning fewer
+  rows than `limit`, per the pagination note above) before treating a
+  PMax total as complete.
 - Search-term exports may include extra header/title rows — detect
   the real header row, never assume row 0
 - Handle Google's "--" placeholder as 0; strip currency symbols and
