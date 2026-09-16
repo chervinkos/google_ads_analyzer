@@ -127,6 +127,54 @@ Each project/account has its own config file under `configs/`
   matching — a term can live in a non-brand campaign but still match
   brand_keywords content-wise; this feeds pattern-seeking/re-homing
   suggestions, not just campaign-based grouping
+- `topic_keywords` (content-based, matched against search-term text) is
+  a distinct axis from `clusters` (campaign-name-based). Give a topic
+  the SAME `name` as its corresponding `clusters` entry when one exists
+  ("core" topics — PL-UA/US/UK/DE/krajowe for meest-post-polska) so
+  `ads_common.classify_topic()`'s output is directly comparable to
+  `match_cluster()`'s. Topics with no corresponding cluster ("tracked"
+  topics — known destinations the account doesn't run a dedicated
+  campaign/cluster for yet) use a fresh name and are reported
+  separately (`tracked_no_campaign` outcome), never as a re-home/negative
+  suggestion. Unlike `intent_keywords`' plain substring match,
+  `topic_keywords` patterns are **regex** (`re.search`, same convention
+  as `clusters`' `match_campaign_name`) — despite sharing the `match:`
+  key name with `intent_keywords` for config-authoring consistency, they
+  go through `matches_any_keyword()`, not the substring path, because
+  geography patterns need real regex features (inflection wildcards like
+  `\w*`, word-boundary lookarounds).
+- `classify_topic()` outcome taxonomy: `single` (exactly one topic
+  matched, cluster+campaign already exists — comparable to
+  `match_cluster`'s result), `tracked_no_campaign` (exactly one topic
+  matched, no cluster covers it), `ambiguous` (2+ conflicting topic
+  matches — deliberately its own bucket, not first-match-wins like
+  `match_cluster` and not multi-label like `match_intents`), `none` (no
+  topic keyword matched at all). A carrier/brand-based inference layer
+  (mapping carrier mentions like InPost/DHL/Meest Post to a topic or to
+  two further outcomes — `irrelevant_import_direction` for
+  service-directions this account doesn't serve, e.g. USPS inbound-only;
+  `carrier_direction_unspecified` for internationally-ambiguous carriers
+  with no stated destination, e.g. FedEx/UPS — plus an orthogonal
+  `marketplace` tag for seller/business-model markers like Amazon/Etsy)
+  is a planned but **not yet implemented** phase 2, gated on reviewing
+  real unclassified-term data first rather than authoring speculative
+  carrier patterns.
+- Geography keyword patterns need real per-language verification, not
+  just Polish: this account has substantial Russian-language query
+  volume in addition to Polish/Ukrainian/English, and Russian and
+  Ukrainian spellings of the same country can differ by a single
+  Cyrillic letter (e.g. Ukraine: Ukrainian "україн" vs. Russian
+  "украин" — missing the Russian form left ~150 real high-volume terms
+  unclassified in one verification pass). Also watch for a short
+  geography root colliding with an unrelated, common domain word in the
+  *same* language — found live: bare `dani[ae]` (Denmark) matched inside
+  "nadanie"/"podanie"/"oddanie" (Polish shipping-domain words for
+  "dispatch"), and bare `czech` (Czech Republic) matched inside
+  "niemczech" (Polish locative "in Germany", from a *different* topic's
+  own pattern) — both fixed with `\b`/lookbehind anchoring. Verify new
+  geography patterns against a real pull's actual search-term text
+  before trusting them, the same way `clusters`' patterns were verified
+  against real campaign names.
 
 ## Scripts
 - `analyze_wasted_spend.py` — search-term waste analysis
@@ -135,8 +183,13 @@ Each project/account has its own config file under `configs/`
   discovery: new-demand, intent-pattern, underexploited high-performer,
   and rising-trend signals
   (`--config configs/<project>.yaml --trailing file.csv --baseline file.csv --keywords file.csv [--output file.csv]`)
+- `analyze_topic_alignment.py` — content-derived topic vs. actual
+  campaign mismatch, cross-campaign duplication, and tracked-but-
+  unserved-country reporting (all three from the same merged
+  search-term CSV used by the scripts above — no new API pull)
+  (`--config configs/<project>.yaml --input file.csv [--campaigns file.csv] [--mismatch-output file.csv] [--duplication-output file.csv] [--tracked-output file.csv] [--unclassified-output file.csv]`)
 - `ads_common.py` — shared helpers (header-row detection, numeric
-  cleanup, cluster/brand/intent matching) used by the scripts above
+  cleanup, cluster/brand/intent/topic matching) used by the scripts above
 - (additional analysis scripts to be added here as they're built)
 
 ## Slash commands

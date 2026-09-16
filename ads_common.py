@@ -208,6 +208,84 @@ def flattened_cluster_keywords(clusters):
     return [kw for kw in keywords if kw]
 
 
+def match_topics(text, topic_keywords):
+    """Content-based topic classification, independent from campaign-name
+    based match_cluster. Returns ALL topic names whose patterns match
+    text (order of topic_keywords) - analogous to match_intents's shape,
+    but classify_topic() applies an exclusive split instead of treating
+    this as multi-label.
+
+    Unlike match_intents' plain substring match, topic_keywords patterns
+    are regex (re.search, case-insensitive) - same convention as
+    match_cluster/matches_any_keyword - since geography patterns need
+    real regex features (inflection wildcards like \\w*, word-boundary
+    lookarounds)."""
+    text = text or ""
+    return [
+        t["name"] for t in topic_keywords or []
+        if matches_any_keyword(text, t.get("match", []))
+    ]
+
+
+def classify_topic(text, topic_keywords, core_topic_names):
+    """Topic outcome per search term, deliberately NOT first-match-wins
+    (unlike match_cluster) and NOT multi-label (unlike match_intents).
+
+    core_topic_names: the set of topic names that already have a
+    same-named entry in `clusters` (a real cluster+campaign exists) -
+    distinguishes "single" (comparable to an existing cluster) from
+    "tracked_no_campaign" (matched, but no cluster covers it).
+
+    Returns (topic, outcome):
+      "single"              -> topic is the one matched name, and it's
+                                in core_topic_names
+      "tracked_no_campaign" -> topic is the one matched name, and it's
+                                NOT in core_topic_names
+      "ambiguous"           -> topic is the matched names, sorted and
+                                "; "-joined (2+ matches, regardless of
+                                whether they're core or tracked)
+      "none"                -> topic is None (no topic keyword matched -
+                                a future carrier-inference layer would
+                                try more rules before falling all the
+                                way to this; not implemented yet)
+    """
+    matches = match_topics(text, topic_keywords)
+    if len(matches) == 1:
+        topic = matches[0]
+        return topic, ("single" if topic in core_topic_names else "tracked_no_campaign")
+    if not matches:
+        return None, "none"
+    return "; ".join(sorted(matches)), "ambiguous"
+
+
+def campaigns_by_cluster(campaign_names, clusters):
+    """Map each cluster name to the set of actual campaign names
+    assigned to it via match_cluster, from the account's known campaign
+    list. Powers the structural "does a campaign already exist for this
+    core topic" check (re-home vs. negative-keyword suggestion)."""
+    mapping = {}
+    for name in campaign_names:
+        cluster = match_cluster(name, clusters)
+        mapping.setdefault(cluster, set()).add(name)
+    return mapping
+
+
+def campaigns_by_topic(campaign_names, topic_keywords):
+    """Map each topic name to the set of actual campaign names whose
+    NAME TEXT matches that topic's own patterns (via match_topics on the
+    campaign name, not the cluster it was assigned to). This is
+    independent of `clusters` entirely - it's what lets
+    tracked_no_campaign correctly tell "no campaign exists for this
+    country at all" apart from "a campaign exists but isn't clustered"
+    (e.g. a Czech-Republic-named campaign that match_cluster would
+    otherwise silently fold into the `international` catch-all)."""
+    mapping = {}
+    for name in campaign_names:
+        for topic in match_topics(name, topic_keywords):
+            mapping.setdefault(topic, set()).add(name)
+    return mapping
+
+
 def write_csv(path, fieldnames, rows):
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)

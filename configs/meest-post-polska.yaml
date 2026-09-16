@@ -74,3 +74,146 @@ intent_keywords:
     match: ["firmowa", "firmowe", "biznes", "hurtowa", "b2b"]
   - name: document-shipping
     match: ["dokument", "dokumenty", "listy", "koperta"]
+
+# NEW, independent axis from `clusters`. `clusters` matches CAMPAIGN
+# NAMES; topic_keywords matches SEARCH-TERM TEXT directly, tuned for how
+# people actually type queries (Polish case inflection, colloquial
+# country names, Ukrainian/Russian/English mixed in) rather than
+# internal campaign-naming tokens. A dry run against this account's real
+# search-term data showed campaign-name patterns applied to term text
+# only catch 23% of unique terms / 48% of cost - this section exists to
+# close that gap, not duplicate `clusters`.
+#
+# Unlike intent_keywords' plain substring match, these are REGEX
+# patterns evaluated via re.search (matches_any_keyword / same
+# convention as clusters' match_campaign_name) - needed for inflection
+# wildcards (\w*) and word-boundary lookarounds. Case-insensitive.
+#
+# Matching is NOT first-match-wins and NOT multi-label - see
+# ads_common.classify_topic's outcome taxonomy (single / ambiguous /
+# tracked_no_campaign / none, plus carrier-driven outcomes in phase 2 -
+# not yet implemented).
+#
+# Topics with a same-named entry in `clusters` (PL-UA/US/UK/DE/krajowe)
+# are "core" - a real campaign+cluster already exists, so a mismatch
+# here can suggest re-homing to a named campaign. The rest are "tracked"
+# topics with no cluster of their own (the account's known-unserved-or-
+# uncategorized destination list) - a match here is reported separately
+# as tracked_no_campaign, never as a re-home/negative suggestion. These
+# are starter patterns (Polish diacritic-correct roots + English names),
+# not exhaustive - expect iterative tuning via analyze_topic_alignment's
+# unclassified-terms output, same as the original 4 core topics.
+topic_keywords:
+  # --- core topics (cluster + campaign already exist) ---
+  - name: PL-UA
+    match:
+      - "ukrain"
+      - "україн"   # Ukrainian Cyrillic spelling ("ї")
+      - "украин"   # Russian Cyrillic spelling ("и") - MISSING originally;
+                    # found live against real data as a very high-volume
+                    # gap (150+ distinct unclassified terms, all clearly
+                    # Ukraine-corridor queries) - Russian and Ukrainian
+                    # spellings of "Ukraine" differ by this one letter
+                    # and this account has heavy Russian-language volume
+
+  - name: PL-US
+    match:
+      - "stan\\w* zjednoczon"   # "stanów zjednoczonych" / "stany zjednoczone"
+      - "do stan\\w*"           # bare "paczka do stanów" - phrase-anchored,
+                                 # deliberately not a bare "stan" root since
+                                 # "stan przesyłki" (shipment status) is a
+                                 # plausible real query in this domain
+      - "(?<![A-Za-z])usa(?![A-Za-z])"
+      - "(?<![A-Za-z])us(?![A-Za-z])"
+      - "сша"   # Russian Cyrillic acronym for USA - found live against
+                # real data (this account has substantial Russian-
+                # language volume alongside Polish/Ukrainian/English)
+
+  - name: PL-UK
+    match:
+      - "wielk\\w* brytani"     # "wielkiej brytanii" / "wielka brytania"
+      - "anglii"                # colloquial "Anglia" - very common in real queries
+      - "anglia"
+      - "united kingdom"
+      - "(?<![A-Za-z])uk(?![A-Za-z])"
+      - "великобритан"   # Russian "Great Britain" - found live against real data
+
+  - name: PL-DE
+    match:
+      - "niemiec"          # niemiecki/do niemiec/z niemiec - all Polish cases
+      - "niemczech"        # locative: "w niemczech"
+      - "niemcy"
+      - "german"
+      - "germany"
+      - "(?<![A-Za-z])ger(?![A-Za-z])"
+      - "герман"   # Russian "Germany" - found live against real data
+
+  - name: krajowe
+    match:
+      - "krajow"
+      - "po polsce"
+      - "w polsce"
+
+  # --- tracked topics (no cluster/campaign of their own yet) ---
+  - name: PL-AT   # Austria
+    match: ["austri"]
+  - name: PL-BE   # Belgium
+    match: ["belgi"]
+  - name: PL-BG   # Bulgaria
+    match: ["bułgari", "bulgari"]
+  - name: PL-GR   # Greece
+    match: ["grecj", "greece"]
+  - name: PL-DK   # Denmark - bare "dani[ae]" without word boundaries
+                  # false-positives badly on "nadanie"/"podanie"/"oddanie"
+                  # (Polish shipping-domain words for "dispatch/sending" -
+                  # found live against this account's real search terms,
+                  # e.g. "nadanie paczki do niemiec" wrongly flagged
+                  # ambiguous PL-DE/PL-DK). \b anchoring fixes it; "dani[aei]"
+                  # covers Dania/Danii (all common Polish cases); "duń"
+                  # catches the adjective (duński/duńska/duńscy).
+    match: ["\\bdani[aei]\\b", "duń"]
+  - name: PL-EE   # Estonia
+    match: ["estoni"]
+  - name: PL-IE   # Ireland
+    match: ["irlandi", "ireland"]
+  - name: PL-ES   # Spain
+    match: ["hiszpani", "spain"]
+  - name: PL-IT   # Italy
+    match: ["włoch", "wloch", "ital", "итали"]   # last: Russian, found live
+  - name: PL-LV   # Latvia
+    match: ["łotw", "lotw", "latvia"]
+  - name: PL-LT   # Lithuania
+    match: ["litw", "lithuania"]
+  - name: PL-LU   # Luxembourg
+    match: ["luksembur"]
+  - name: PL-PT   # Portugal
+    match: ["portugali"]
+  - name: PL-RO   # Romania
+    match: ["rumuni", "romania"]
+  - name: PL-SK   # Slovakia
+    match: ["słowacj", "slowacj", "slovakia"]
+  - name: PL-SI   # Slovenia
+    match: ["słoweni", "sloweni", "slovenia"]
+  - name: PL-HU   # Hungary
+    match: ["węgr", "wegr", "hungary"]
+  - name: PL-FI   # Finland
+    match: ["finlandi", "finland"]
+  - name: PL-FR   # France
+    match: ["francj", "france"]
+  - name: PL-HR   # Croatia
+    match: ["chorwacj", "croatia"]
+  - name: PL-CZ   # Czech Republic - NOTE: a real campaign already exists
+                  # (PM leady [ua] Czechy) but has no cluster - see
+                  # tracked_no_campaign's campaign-exists sub-case.
+                  # Bare "czech" false-positives on "niemczech" (Polish
+                  # locative "in Germany", from PL-DE's own pattern) -
+                  # found live against this account's real search terms.
+                  # Negative lookbehind fixes it; "czesk" adds the
+                  # adjective forms (czeski/czeska/czeskie).
+    match: ["(?<![a-ząćęłńóśźż])czech", "czesk", "чехи", "чех[иі]ю", "чешск"]   # last 3: Russian, found live
+  - name: PL-SE   # Sweden
+    match: ["szwecj", "sweden"]
+  - name: PL-CA   # Canada - NOTE: a real campaign already exists
+                  # (PMax | Kanada) but has no cluster - see
+                  # tracked_no_campaign's campaign-exists sub-case
+    match: ["kanad", "canada"]
