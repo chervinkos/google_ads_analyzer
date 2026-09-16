@@ -107,10 +107,18 @@ def resolve_columns(fieldnames, wanted):
 _NUMERIC_KEEP = re.compile(r"[^\d.,\-]")
 
 
-def _normalize_decimal_separator(text):
+def _normalize_decimal_separator(text, decimal_style=None):
     """Resolve which of ',' or '.' is the decimal point vs. a thousands
     separator, since Google Ads exports vary by locale (e.g. Polish
-    exports use ',' as the decimal separator: "25,00" is 25.00, not 2500)."""
+    exports use ',' as the decimal separator: "25,00" is 25.00, not 2500).
+
+    decimal_style, when given (from infer_decimal_style() - see there for
+    why a single cell can't always resolve this on its own), is trusted
+    outright instead of guessing from this one cell: it's the separator
+    character already confirmed to be the decimal point for this cell's
+    whole column, so the *other* character can only be a thousands
+    separator anywhere in that column, including here.
+    """
     last_comma = text.rfind(",")
     last_dot = text.rfind(".")
 
@@ -124,6 +132,9 @@ def _normalize_decimal_separator(text):
     if sep_char is None:
         return text
 
+    if decimal_style is not None:
+        return text.replace(sep_char, ".") if sep_char == decimal_style else text.replace(sep_char, "")
+
     last_idx = text.rfind(sep_char)
     frac_len = len(text) - last_idx - 1
     # A real thousands separator always groups digits in 3s, so only a
@@ -132,19 +143,76 @@ def _normalize_decimal_separator(text):
     # fractional-conversion precision the Google Ads API returns, e.g.
     # 73.3006 conversions) is unambiguously a decimal point - treating
     # every 3+ digit tail as "thousands" (the old rule) silently mangled
-    # any field with more than 2 decimal digits into a huge integer.
+    # any field with more than 2 decimal digits into a huge integer. This
+    # per-cell guess is only reached when the caller has no column-wide
+    # decimal_style to hand us (see infer_decimal_style()) - prefer that
+    # whenever a whole column of raw values is available, since it can
+    # actually resolve what a single cell fundamentally cannot.
     if frac_len != 3 and text.count(sep_char) == 1:
         return text.replace(sep_char, ".")
     # Otherwise (a 3-digit tail, or repeated separators) it's thousands grouping.
     return text.replace(sep_char, "")
 
 
-def clean_number(value):
+def infer_decimal_style(raw_values):
+    """Infer the decimal-separator convention for a whole column of raw
+    numeric-looking strings, by scanning for any one value that's
+    unambiguous on its own (see _normalize_decimal_separator: only a lone
+    separator with an exact 3-digit tail is ambiguous). A real export's
+    numeric formatting is consistent within one column, so a single
+    unambiguous row resolves every ambiguous row alongside it - this is
+    what makes the ambiguity fixable in code rather than left to a
+    writer-side rounding convention nothing enforces.
+
+    Returns '.' or ',' (the decimal separator character) once a signal is
+    found, or None when the column has no unambiguous value anywhere (e.g.
+    every value is a plain integer, or every value happens to land on an
+    exact 3-digit tail) - callers should treat None as "fall back to
+    clean_number()'s per-cell guess", which is the best available answer
+    in that rare case.
+    """
+    for raw in raw_values:
+        text = str(raw if raw is not None else "").strip()
+        if text == "" or text == PLACEHOLDER:
+            continue
+        text = text.replace("%", "")
+        text = _NUMERIC_KEEP.sub("", text)
+
+        last_comma = text.rfind(",")
+        last_dot = text.rfind(".")
+        if last_comma != -1 and last_dot != -1:
+            return "," if last_comma > last_dot else "."
+
+        sep_char = "," if last_comma != -1 else "." if last_dot != -1 else None
+        if sep_char is None or text.count(sep_char) != 1:
+            continue  # no separator, or repeated (thousands-only) - no decimal signal in this cell
+        frac_len = len(text) - text.rfind(sep_char) - 1
+        if frac_len != 3:
+            return sep_char
+    return None
+
+
+def resolve_decimal_styles(records, cols, fields):
+    """infer_decimal_style() for several columns at once - {field:
+    decimal_style_or_None}, for every field in `fields` that's present in
+    `cols` (the output of resolve_columns()). Scans the whole column once
+    per field, so callers should call this once per file, not per row."""
+    return {
+        field: infer_decimal_style(row.get(cols[field], "") for row in records)
+        for field in fields if field in cols
+    }
+
+
+def clean_number(value, decimal_style=None):
     """Parse a Google Ads numeric cell.
 
     Treats the '--' placeholder (and blanks) as 0, and strips currency
     symbols and percent signs while resolving locale-specific decimal
     vs. thousands separators.
+
+    decimal_style, when given, skips this cell's own (sometimes genuinely
+    ambiguous) per-cell guess in favor of a convention already resolved
+    for this cell's whole column - see infer_decimal_style().
     """
     if value is None:
         return 0.0
@@ -153,7 +221,7 @@ def clean_number(value):
         return 0.0
     text = text.replace("%", "")
     text = _NUMERIC_KEEP.sub("", text)
-    text = _normalize_decimal_separator(text)
+    text = _normalize_decimal_separator(text, decimal_style)
     if text in ("", "-", "."):
         return 0.0
     try:
@@ -331,12 +399,16 @@ def aggregate_campaign_metrics(records, cols):
     aggregated over the query's date range by the Google Ads API), so this
     only matters as a defensive dedup.
     """
+    numeric_fields = ["impressions", "clicks", "cost", "conversions", "conversions_value",
+                       "search_impression_share", "lost_is_rank", "lost_is_budget"]
+    decimal_styles = resolve_decimal_styles(records, cols, numeric_fields)
+
     campaigns = {}
     for row in records:
         name = row.get(cols.get("campaign", ""), "").strip()
         if not name:
             continue
-        cost = clean_number(row.get(cols.get("cost", ""), ""))
+        cost = clean_number(row.get(cols.get("cost", ""), ""), decimal_styles.get("cost"))
         agg = campaigns.setdefault(name, {
             "campaign": name, "channel_type": "",
             "impressions": 0.0, "clicks": 0.0, "cost": 0.0,
@@ -344,12 +416,12 @@ def aggregate_campaign_metrics(records, cols):
             "search_impression_share": None, "lost_is_rank": None, "lost_is_budget": None,
             "_top_cost": -1.0,
         })
-        agg["impressions"] += clean_number(row.get(cols.get("impressions", ""), ""))
-        agg["clicks"] += clean_number(row.get(cols.get("clicks", ""), ""))
+        agg["impressions"] += clean_number(row.get(cols.get("impressions", ""), ""), decimal_styles.get("impressions"))
+        agg["clicks"] += clean_number(row.get(cols.get("clicks", ""), ""), decimal_styles.get("clicks"))
         agg["cost"] += cost
-        agg["conversions"] += clean_number(row.get(cols.get("conversions", ""), ""))
+        agg["conversions"] += clean_number(row.get(cols.get("conversions", ""), ""), decimal_styles.get("conversions"))
         if "conversions_value" in cols:
-            agg["conversions_value"] += clean_number(row.get(cols["conversions_value"], ""))
+            agg["conversions_value"] += clean_number(row.get(cols["conversions_value"], ""), decimal_styles.get("conversions_value"))
         if cost >= agg["_top_cost"]:
             agg["_top_cost"] = cost
             channel_type = row.get(cols.get("channel_type", ""), "").strip()
@@ -357,7 +429,7 @@ def aggregate_campaign_metrics(records, cols):
                 agg["channel_type"] = channel_type
             for field in ("search_impression_share", "lost_is_rank", "lost_is_budget"):
                 if field in cols:
-                    agg[field] = clean_number(row.get(cols[field], ""))
+                    agg[field] = clean_number(row.get(cols[field], ""), decimal_styles.get(field))
     for agg in campaigns.values():
         agg.pop("_top_cost", None)
     return campaigns

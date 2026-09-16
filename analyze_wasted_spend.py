@@ -59,6 +59,13 @@ def main():
         sys.exit(f"Could not find required column(s) {missing} in {args.input} "
                   f"(saw headers: {list(records[0].keys())})")
 
+    # Resolved once per numeric column (not per cell) - see
+    # infer_decimal_style() in ads_common.py: a single ambiguous cell like
+    # "22.283" can't tell decimal from thousands-grouped on its own, but an
+    # unambiguous sibling elsewhere in the same column can, and usually is
+    # there (e.g. a fractional Google Ads conversions value like 73.3006).
+    decimal_styles = common.resolve_decimal_styles(records, cols, ["clicks", "cost", "conversions"])
+
     flagged, insufficient = [], []
     total_cost = 0.0
     cluster_breakdown = {}
@@ -71,9 +78,9 @@ def main():
             insufficient.append(row)
             continue
 
-        clicks = common.clean_number(row.get(cols["clicks"]))
-        cost = common.clean_number(row.get(cols["cost"]))
-        conversions = common.clean_number(row.get(cols["conversions"])) if "conversions" in cols else 0.0
+        clicks = common.clean_number(row.get(cols["clicks"]), decimal_styles.get("clicks"))
+        cost = common.clean_number(row.get(cols["cost"]), decimal_styles.get("cost"))
+        conversions = common.clean_number(row.get(cols["conversions"]), decimal_styles.get("conversions")) if "conversions" in cols else 0.0
 
         cost_flag = cost >= min_cost
         click_flag = clicks >= min_clicks and conversions < LOW_CONVERSIONS_THRESHOLD

@@ -51,13 +51,21 @@ Each project/account has its own config file under `configs/`
   thousands separators from numeric fields
 - `clean_number()`'s locale-detection heuristic treats a lone "." or ","
   followed by exactly 3 digits as a thousands separator (genuinely
-  ambiguous with real Google Ads locale formatting, e.g. "22.283" could be
-  22.283 or 22,283) - this is unresolvable by the parser, so it's a
-  writer-side constraint instead: any CSV this toolkit generates itself
-  (e.g. from a raw MCP pull) must round numeric fields to at most 2
-  decimal places before writing. A field like the API's raw conversions
-  value (e.g. 22.282975) silently becomes 22283 if written with 3+ decimals
-  and the rounding happens to leave exactly 3 digits after the separator
+  ambiguous *for a single cell in isolation* with real Google Ads locale
+  formatting, e.g. "22.283" could be 22.283 or 22,283 - a field like the
+  API's raw conversions value, e.g. 22.282975, becomes 22283 if this is
+  guessed wrong). This is resolved at the column level instead of the
+  cell level: `infer_decimal_style()` scans a whole column of raw values
+  for any one unambiguous cell (a real export's number formatting is
+  consistent within a column), and `resolve_decimal_styles()` does this
+  for several columns at once - call it right after `resolve_columns()`
+  and pass the result into every `clean_number()` call for that column
+  (all four scripts' loaders and `aggregate_campaign_metrics()` already do
+  this). Only when a column has *no* unambiguous value anywhere (rare -
+  e.g. every row happens to land on an exact 3-digit tail) does
+  `clean_number()` fall back to its old per-cell guess - as a residual
+  safety net for that case, still round numeric fields to at most 2
+  decimal places when hand-building a CSV from a raw MCP pull
 - Search terms need joining from ad_group → campaign name; some ad
   groups may be missing from an initial batch pull and require a
   follow-up fetch

@@ -76,15 +76,19 @@ def resolve_term_columns(records, label):
 def aggregate_by_term(records, cols):
     """Group rows by search term, summing metrics across campaigns/ad
     groups, keeping the campaign of the highest-cost row for tagging."""
+    # Resolved once per numeric column, not per cell - see
+    # infer_decimal_style() in ads_common.py.
+    decimal_styles = common.resolve_decimal_styles(records, cols, ["clicks", "cost", "conversions"])
+
     terms = {}
     for row in records:
         search_term = row.get(cols["search_term"], "").strip()
         if not search_term:
             continue
         campaign = row.get(cols["campaign"], "").strip()
-        clicks = common.clean_number(row.get(cols["clicks"]))
-        cost = common.clean_number(row.get(cols["cost"]))
-        conversions = common.clean_number(row.get(cols["conversions"])) if "conversions" in cols else 0.0
+        clicks = common.clean_number(row.get(cols["clicks"]), decimal_styles.get("clicks"))
+        cost = common.clean_number(row.get(cols["cost"]), decimal_styles.get("cost"))
+        conversions = common.clean_number(row.get(cols["conversions"]), decimal_styles.get("conversions")) if "conversions" in cols else 0.0
 
         key = search_term.lower()
         agg = terms.setdefault(key, {

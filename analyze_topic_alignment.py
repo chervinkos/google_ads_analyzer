@@ -138,6 +138,10 @@ def main():
         sys.exit(f"Could not find required column(s) {missing} in {args.input} "
                   f"(saw headers: {list(records[0].keys())})")
 
+    # Resolved once per numeric column, not per cell - see
+    # infer_decimal_style() in ads_common.py.
+    decimal_styles = common.resolve_decimal_styles(records, cols, ["clicks", "cost", "conversions"])
+
     classified, unclassified = [], []
     tally = {}
 
@@ -155,9 +159,9 @@ def main():
             continue
 
         current_cluster = common.match_cluster(campaign, clusters)
-        clicks = common.clean_number(row.get(cols.get("clicks", ""), ""))
-        cost = common.clean_number(row.get(cols.get("cost", ""), ""))
-        conversions = common.clean_number(row.get(cols.get("conversions", ""), ""))
+        clicks = common.clean_number(row.get(cols.get("clicks", ""), ""), decimal_styles.get("clicks"))
+        cost = common.clean_number(row.get(cols.get("cost", ""), ""), decimal_styles.get("cost"))
+        conversions = common.clean_number(row.get(cols.get("conversions", ""), ""), decimal_styles.get("conversions"))
 
         classified.append({
             "search_term": search_term,

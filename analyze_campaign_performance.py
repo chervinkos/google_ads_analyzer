@@ -42,14 +42,14 @@ the peer group) and mean volume (simple average of each member's
 conversions) - never a naive mean-of-CACs, which a single tiny-volume
 campaign could swing wildly.
 
-Input CSV precision constraint: numeric fields must be written with at most
-2 decimal places. clean_number()'s locale-detection heuristic treats a lone
-"." or "," followed by exactly 3 digits as a thousands separator (e.g.
-"22.283" reads as 22283, not 22.283) - genuinely ambiguous with real
-Google Ads locale formatting, and not resolvable by the parser. A value
-like Parcels conversions (which the API returns as a float, e.g.
-22.282975) must be rounded to 2 decimals before being written, never left
-at 3-4+ decimals of raw API precision.
+Numeric parsing note: raw API-precision values (e.g. Parcels conversions
+as 22.282975) are safe to write as-is - aggregate_campaign_metrics() infers
+each column's decimal-separator convention from the whole column (see
+ads_common.infer_decimal_style()), not by guessing at each cell in
+isolation, so an ambiguous single cell like "22.283" is resolved by any
+unambiguous sibling elsewhere in the same column. Only round to 2 decimals
+as a fallback if a column could plausibly have zero unambiguous values
+anywhere in it (rare).
 
 Usage:
     analyze_campaign_performance.py --config configs/<project>.yaml \\
