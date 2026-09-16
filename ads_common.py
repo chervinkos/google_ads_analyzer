@@ -19,6 +19,7 @@ HEADER_HINTS = {
     "search term", "campaign", "campaign name", "ad group", "ad group name",
     "clicks", "cost", "conversions", "impressions", "keyword",
     "keyword text", "avg. cpc", "ctr", "status", "campaign status",
+    "channel type", "conv. value",
 }
 
 # Candidate header labels per logical field, matched case-insensitively.
@@ -33,6 +34,15 @@ COLUMN_CANDIDATES = {
     "impressions": ["impressions", "impr."],
     "keyword": ["keyword", "keyword text"],
     "status": ["campaign status", "status"],
+    "channel_type": ["channel type", "campaign type", "advertising channel type"],
+    "conversions_value": ["conv. value", "all conv. value", "conversion value", "conversions value"],
+    # Impression-share fields are written as fractions (0.102, not "10.2%")
+    # by this toolkit's own MCP-pull CSVs, to avoid the ambiguity of a "%"
+    # string that clean_number() would strip without rescaling. A raw
+    # Google Ads UI export using "%" strings would need conversion first.
+    "search_impression_share": ["search impr. share", "search impression share"],
+    "lost_is_rank": ["search lost is (rank)", "search rank lost impression share", "lost is (rank)"],
+    "lost_is_budget": ["search lost is (budget)", "search budget lost impression share", "lost is (budget)"],
 }
 
 
@@ -116,9 +126,16 @@ def _normalize_decimal_separator(text):
 
     last_idx = text.rfind(sep_char)
     frac_len = len(text) - last_idx - 1
-    if frac_len in (1, 2) and text.count(sep_char) == 1:
+    # A real thousands separator always groups digits in 3s, so only a
+    # *3-digit* tail after a single lone separator is truly ambiguous with
+    # grouping. Any other tail length (1-2 = cents, 4+ = the sub-cent/
+    # fractional-conversion precision the Google Ads API returns, e.g.
+    # 73.3006 conversions) is unambiguously a decimal point - treating
+    # every 3+ digit tail as "thousands" (the old rule) silently mangled
+    # any field with more than 2 decimal digits into a huge integer.
+    if frac_len != 3 and text.count(sep_char) == 1:
         return text.replace(sep_char, ".")
-    # Otherwise it's a thousands separator (possibly repeated) - drop it.
+    # Otherwise (a 3-digit tail, or repeated separators) it's thousands grouping.
     return text.replace(sep_char, "")
 
 
@@ -301,6 +318,106 @@ def classify_topic(text, topic_keywords, topic_campaigns):
     if topic_campaigns.get(topic):
         return "single", matched
     return "tracked_no_campaign", matched
+
+
+def aggregate_campaign_metrics(records, cols):
+    """Group campaign-metrics rows by campaign name.
+
+    Additive metrics (impressions/clicks/cost/conversions/conversions_value)
+    are summed. Impression-share metrics are ratios, not additive, so they're
+    taken from whichever row has the highest cost - matches the "top_cost"
+    attribution pattern already used for search-term aggregation. In
+    practice each campaign is expected to appear as a single row (already
+    aggregated over the query's date range by the Google Ads API), so this
+    only matters as a defensive dedup.
+    """
+    campaigns = {}
+    for row in records:
+        name = row.get(cols.get("campaign", ""), "").strip()
+        if not name:
+            continue
+        cost = clean_number(row.get(cols.get("cost", ""), ""))
+        agg = campaigns.setdefault(name, {
+            "campaign": name, "channel_type": "",
+            "impressions": 0.0, "clicks": 0.0, "cost": 0.0,
+            "conversions": 0.0, "conversions_value": 0.0,
+            "search_impression_share": None, "lost_is_rank": None, "lost_is_budget": None,
+            "_top_cost": -1.0,
+        })
+        agg["impressions"] += clean_number(row.get(cols.get("impressions", ""), ""))
+        agg["clicks"] += clean_number(row.get(cols.get("clicks", ""), ""))
+        agg["cost"] += cost
+        agg["conversions"] += clean_number(row.get(cols.get("conversions", ""), ""))
+        if "conversions_value" in cols:
+            agg["conversions_value"] += clean_number(row.get(cols["conversions_value"], ""))
+        if cost >= agg["_top_cost"]:
+            agg["_top_cost"] = cost
+            channel_type = row.get(cols.get("channel_type", ""), "").strip()
+            if channel_type:
+                agg["channel_type"] = channel_type
+            for field in ("search_impression_share", "lost_is_rank", "lost_is_budget"):
+                if field in cols:
+                    agg[field] = clean_number(row.get(cols[field], ""))
+    for agg in campaigns.values():
+        agg.pop("_top_cost", None)
+    return campaigns
+
+
+def compute_cac(cost, conversions):
+    """Cost per acquisition. None (not 0) when there are no conversions to
+    divide by - a zero-conversion campaign's CAC is undefined, not free."""
+    if conversions and conversions > 0:
+        return cost / conversions
+    return None
+
+
+QUADRANT_ACTIONS = {
+    "Star": "Scale - increase budget/bids, protect what's working",
+    "Efficient (underexploited)": "Scale/Launch - efficient at current spend, has room to grow",
+    "Review (high spend, high volume)": "Edit - meaningful volume but inefficient, needs optimization before scaling further",
+    "Underperformer": "Cut or fundamentally edit - low volume and inefficient",
+}
+
+
+def classify_quadrant(cac, volume, target_cac, target_volume):
+    """CAC x volume quadrant, relative to a (target_cac, target_volume)
+    benchmark pair - resolving which benchmark (cluster/target/account mode)
+    to use is the caller's job; this only compares against what it's given.
+
+    Returns None when classification isn't possible (e.g. no conversions,
+    or no benchmark available).
+    """
+    if cac is None or target_cac is None or target_volume is None:
+        return None
+    efficient = cac <= target_cac
+    high_volume = volume >= target_volume
+    if efficient and high_volume:
+        return "Star"
+    if efficient and not high_volume:
+        return "Efficient (underexploited)"
+    if not efficient and high_volume:
+        return "Review (high spend, high volume)"
+    return "Underperformer"
+
+
+LOST_IS_FLAG_THRESHOLD = 0.10  # 10 percentage points - below this, treat as noise
+
+
+def lost_is_diagnostic(lost_is_rank, lost_is_budget, threshold=LOST_IS_FLAG_THRESHOLD):
+    """Separate diagnostic tag, never folded into the quadrant score - which
+    Lost Impression Share driver(s), if any, are large enough to matter.
+    Both tags are included when both clear the threshold (sorted, larger
+    first), so the reader sees the primary lever (rank/quality vs. budget)
+    without losing a secondary one."""
+    tags = []
+    if lost_is_rank is not None and lost_is_rank >= threshold:
+        tags.append(("rank", lost_is_rank))
+    if lost_is_budget is not None and lost_is_budget >= threshold:
+        tags.append(("budget", lost_is_budget))
+    if not tags:
+        return None
+    tags.sort(key=lambda t: -t[1])
+    return "; ".join(f"Lost IS ({kind}): {pct * 100:.0f}%" for kind, pct in tags)
 
 
 def write_csv(path, fieldnames, rows):

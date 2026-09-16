@@ -49,6 +49,15 @@ Each project/account has its own config file under `configs/`
   the real header row, never assume row 0
 - Handle Google's "--" placeholder as 0; strip currency symbols and
   thousands separators from numeric fields
+- `clean_number()`'s locale-detection heuristic treats a lone "." or ","
+  followed by exactly 3 digits as a thousands separator (genuinely
+  ambiguous with real Google Ads locale formatting, e.g. "22.283" could be
+  22.283 or 22,283) - this is unresolvable by the parser, so it's a
+  writer-side constraint instead: any CSV this toolkit generates itself
+  (e.g. from a raw MCP pull) must round numeric fields to at most 2
+  decimal places before writing. A field like the API's raw conversions
+  value (e.g. 22.282975) silently becomes 22283 if written with 3+ decimals
+  and the rounding happens to leave exactly 3 digits after the separator
 - Search terms need joining from ad_group → campaign name; some ad
   groups may be missing from an initial batch pull and require a
   follow-up fetch
@@ -83,6 +92,16 @@ Each project/account has its own config file under `configs/`
   matching — a term can live in a non-brand campaign but still match
   brand_keywords content-wise; this feeds pattern-seeking/re-homing
   suggestions, not just campaign-based grouping
+- Lost Impression Share (`metrics.search_rank_lost_impression_share`,
+  `metrics.search_budget_lost_impression_share`) is populated for
+  **Performance Max** campaigns too, not just Search - confirmed live
+  against this account (verify per-account if metrics look suspiciously
+  zero, since a channel-type gap would silently look like "no lost IS"
+  rather than "not available")
+- `metrics.cost_micros` cannot be selected/filtered in the same query as
+  `segments.conversion_action_name` (cost isn't attributable per-
+  conversion-action) - pull cost and per-action conversions as two
+  separate queries and join by campaign name, not one combined query
 - Topic classification (`topic_keywords` in config, `analyze_topic_alignment.py`)
   is a second, independent axis from clusters — content-based (matches the
   search term's text) rather than campaign-based (matches the campaign
@@ -107,8 +126,15 @@ Each project/account has its own config file under `configs/`
   suggestion, and surfaces real demand for tracked countries with no
   dedicated campaign yet
   (`--config configs/<project>.yaml --input file.csv --campaigns file.csv [--output file.csv]`)
+- `analyze_campaign_performance.py` — campaign performance narrative report
+  (v1, Ads-only): cohort (destination cluster) and nested campaign-level
+  CAC × volume quadrant classification against a switchable benchmark
+  (cluster/account/target), with Lost Impression Share as a separate
+  diagnostic tag, output as a markdown narrative + CSV backups
+  (`--config configs/<project>.yaml --period file.csv --period-label "..." --comparison file.csv --comparison-label "..." [--benchmark cluster|account|target] [--target file.csv --target-label "..."] [--output file.md]`)
 - `ads_common.py` — shared helpers (header-row detection, numeric
-  cleanup, cluster/brand/intent/topic matching) used by the scripts above
+  cleanup, cluster/brand/intent/topic/quadrant matching) used by the
+  scripts above
 - (additional analysis scripts to be added here as they're built)
 
 ## Slash commands
