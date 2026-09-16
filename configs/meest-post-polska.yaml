@@ -56,6 +56,139 @@ clusters:
   - name: international
     match_campaign_name: "catch-all"   # anything not matched above
 
+# Content-based country/destination detection, run against the search
+# *term* text itself (not the campaign it currently lives in) - an
+# independent axis from clusters[] above. Feeds analyze_topic_alignment.py's
+# mismatch/re-home signal (a term whose content says one country but whose
+# campaign says another) and its demand-discovery signal (real query volume
+# for a country the account doesn't yet serve at all).
+#
+# `cluster` links a topic to its corresponding clusters[] entry, for the 4
+# "core" destinations already served by a dedicated cluster (US/UK/UA/DE).
+# Topics with no `cluster` field are "tracked": countries with real or
+# plausible demand but no dedicated campaign/cluster yet - classify_topic()
+# reports these as tracked_no_campaign rather than single, and the script's
+# re-home suggestion only ever points at a live ENABLED campaign, never at
+# a tracked topic.
+#
+# Same regex conventions as clusters (re.search, case-insensitive). Short
+# 2-letter country codes are deliberately NOT used as bare patterns here
+# (unlike clusters' campaign-name matching) - free-text search-term content
+# in Polish is full of short words/diacritics that a 2-letter code would
+# false-positive against (e.g. bare "us" inside "usługa" = "service"), so
+# every pattern below is a full country-name root or longer.
+#
+# Built 2026-09-16 as a first pass - most tracked entries below are 1-3
+# starter patterns (Polish + English only) and have NOT yet been checked
+# against real search-term data for false positives (a short root colliding
+# with an unrelated common word) or missing-language gaps (this account
+# also has real Ukrainian, Russian, and mixed-script query volume). That
+# verification is pending - do not treat this list as final. Two known
+# collision risks were designed around up front rather than left for
+# verification to catch:
+#   - Denmark: avoided a bare "dan"/"dani" root, since "dania" is also the
+#     plural of the common Polish word "danie" (a dish/course of food) -
+#     used "duń" (Duński/Dunczyk) instead, which isn't a real-word substring.
+#   - Czech Republic: avoided bare "czech", since it's a literal substring
+#     of "Niemczech" (locative case of "Niemcy" = Germany, e.g. "wysyłka do
+#     Niemczech") - used "czechy" (has no matching "y" in "Niemczech") and
+#     full "czech republic" instead.
+topic_keywords:
+  - name: PL-UA
+    cluster: PL-UA
+    match: ["ukrain", "україн", "украин"]
+
+  - name: PL-US
+    cluster: PL-US
+    match: ["usa", "stany zjednoczone", "united states"]
+
+  - name: PL-UK
+    cluster: PL-UK
+    match: ["wielka brytania", "united kingdom", "anglia", "angli"]
+
+  - name: PL-DE
+    cluster: PL-DE
+    match: ["niemc", "niemiec", "german"]
+
+  - name: PL-AT   # Austria
+    match: ["austri", "wiedeń", "wieden"]
+
+  - name: PL-BE   # Belgium
+    match: ["belgi"]
+
+  - name: PL-BG   # Bulgaria
+    match: ["bułgari", "bulgari"]
+
+  - name: PL-GR   # Greece
+    match: ["grecj", "greece"]
+
+  - name: PL-DK   # Denmark
+    match: ["duń", "denmark", "kopenhag"]
+
+  - name: PL-EE   # Estonia
+    match: ["estoni"]
+
+  - name: PL-IE   # Ireland
+    match: ["irlandi", "ireland"]
+
+  - name: PL-ES   # Spain
+    match: ["hiszpani", "spain"]
+
+  - name: PL-IT   # Italy
+    match: ["włoch", "wloch", "ital"]
+
+  - name: PL-LV   # Latvia
+    match: ["łotw", "lotw", "latvia"]
+
+  - name: PL-LT   # Lithuania
+    match: ["litw", "lithuania"]
+
+  - name: PL-LU   # Luxembourg
+    match: ["luksemburg", "luxembourg"]
+
+  - name: PL-PT   # Portugal
+    match: ["portugal"]
+
+  - name: PL-RO   # Romania
+    match: ["rumuni", "romania"]
+
+  - name: PL-SK   # Slovakia
+    match: ["słowacj", "slowacj", "slovakia"]
+
+  - name: PL-SI   # Slovenia
+    match: ["słoweni", "sloweni", "slovenia"]
+
+  - name: PL-HU   # Hungary
+    match: ["węgr", "wegr", "hungary"]
+
+  - name: PL-FI   # Finland
+    match: ["finlandi", "finland"]
+
+  - name: PL-FR   # France
+    match: ["francj", "france"]
+
+  - name: PL-HR   # Croatia
+    match: ["chorwacj", "croatia"]
+
+  - name: PL-CZ   # Czech Republic
+    # Plain "czechy" (nominative plural) is a safe bare substring, but the
+    # genitive "do Czech" (a plausible real query, like "do Niemiec" for
+    # Germany) needs a boundary-anchored "czech" instead of bare "czech" -
+    # bare "czech" is a literal substring of "Niemczech" (locative of
+    # Germany). Anchoring with (?<![A-Za-z]) blocks that: the "m" right
+    # before "czech" in "Niemczech" is a letter, so the lookbehind fails
+    # there, while "do Czech" (preceded by a space) still matches.
+    match: ["czechy", "(?<![A-Za-z])czech(?![A-Za-z])", "czech republic", "republika czeska"]
+
+  - name: PL-SE   # Sweden
+    match: ["szwecj", "sweden"]
+
+  - name: PL-CA   # Canada
+    match: ["kanad", "canada"]
+
+  - name: PL-NL   # Netherlands
+    match: ["holandi", "niderland", "netherlands"]
+
 # Used for search-term-level brand detection (content matching),
 # independent of which campaign the term currently lives in —
 # feeds the pattern-seeking / re-homing suggestion stage.

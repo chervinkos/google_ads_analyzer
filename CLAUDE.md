@@ -83,6 +83,16 @@ Each project/account has its own config file under `configs/`
   matching — a term can live in a non-brand campaign but still match
   brand_keywords content-wise; this feeds pattern-seeking/re-homing
   suggestions, not just campaign-based grouping
+- Topic classification (`topic_keywords` in config, `analyze_topic_alignment.py`)
+  is a second, independent axis from clusters — content-based (matches the
+  search term's text) rather than campaign-based (matches the campaign
+  name). A topic optionally links to a cluster via `cluster:` for
+  countries already served (the "core" topics); topics with no `cluster`
+  are "tracked" countries with no dedicated campaign yet. Re-home
+  suggestions must only ever point at a live **ENABLED** campaign — a
+  PAUSED or REMOVED campaign is never a valid reassignment target, only a
+  cheaper-to-reactivate signal, so campaign status must always be pulled
+  fresh via MCP (never cached) before running this analysis
 
 ## Scripts
 - `analyze_wasted_spend.py` — search-term waste analysis
@@ -91,8 +101,14 @@ Each project/account has its own config file under `configs/`
   discovery: new-demand, intent-pattern, underexploited high-performer,
   and rising-trend signals
   (`--config configs/<project>.yaml --trailing file.csv --baseline file.csv --keywords file.csv [--output file.csv]`)
+- `analyze_topic_alignment.py` — content-based topic (country/destination)
+  classification vs. campaign-based clusters: flags mismatches (a term's
+  content says one country, its campaign says another) with a re-home
+  suggestion, and surfaces real demand for tracked countries with no
+  dedicated campaign yet
+  (`--config configs/<project>.yaml --input file.csv --campaigns file.csv [--output file.csv]`)
 - `ads_common.py` — shared helpers (header-row detection, numeric
-  cleanup, cluster/brand/intent matching) used by the scripts above
+  cleanup, cluster/brand/intent/topic matching) used by the scripts above
 - (additional analysis scripts to be added here as they're built)
 
 ## Slash commands

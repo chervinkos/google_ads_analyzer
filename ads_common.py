@@ -18,7 +18,7 @@ PLACEHOLDER = "--"
 HEADER_HINTS = {
     "search term", "campaign", "campaign name", "ad group", "ad group name",
     "clicks", "cost", "conversions", "impressions", "keyword",
-    "keyword text", "avg. cpc", "ctr",
+    "keyword text", "avg. cpc", "ctr", "status", "campaign status",
 }
 
 # Candidate header labels per logical field, matched case-insensitively.
@@ -32,6 +32,7 @@ COLUMN_CANDIDATES = {
     "conversions": ["conversions", "conv.", "all conv."],
     "impressions": ["impressions", "impr."],
     "keyword": ["keyword", "keyword text"],
+    "status": ["campaign status", "status"],
 }
 
 
@@ -200,6 +201,106 @@ def flattened_cluster_keywords(clusters):
             continue
         keywords.extend(match if isinstance(match, list) else [match])
     return [kw for kw in keywords if kw]
+
+
+def match_topics(text, topic_keywords):
+    """Content-based topic detection: which topics' patterns appear in this
+    text (typically a search term), independent of which cluster the term's
+    *campaign* belongs to. Unlike match_cluster, this is not first-match-
+    wins - every topic is checked, so callers can detect ambiguous terms
+    that match 2+ conflicting topics.
+
+    Returns a list of topic names (possibly empty, single, or multiple).
+    """
+    text = text or ""
+    matched = []
+    for topic in topic_keywords or []:
+        patterns = topic.get("match") or []
+        if any(pattern and re.search(pattern, text, re.IGNORECASE) for pattern in patterns):
+            matched.append(topic["name"])
+    return matched
+
+
+def campaigns_by_cluster(campaigns, clusters, active_statuses=("ENABLED",)):
+    """Group live campaigns by their clusters[] assignment.
+
+    campaigns: iterable of dicts with at least 'name' and 'status' keys
+    (status values as returned by the Google Ads API, e.g. "ENABLED",
+    "PAUSED", "REMOVED").
+
+    Only campaigns whose status is in active_statuses are included, so a
+    REMOVED (or, by default, PAUSED) campaign is never returned as a
+    re-home target. Callers that specifically need dormant campaigns (e.g.
+    to add an "evaluate/reactivate" caveat) should call this again with an
+    explicit wider active_statuses tuple.
+    """
+    grouped = {}
+    for campaign in campaigns:
+        if campaign.get("status") not in active_statuses:
+            continue
+        cluster_name = match_cluster(campaign.get("name"), clusters)
+        grouped.setdefault(cluster_name, []).append(campaign)
+    return grouped
+
+
+def campaigns_by_topic(campaigns, clusters, topic_keywords, active_statuses=("ENABLED",)):
+    """Group live campaigns by topic, via each topic's linked cluster.
+
+    Topics with no `cluster` field (the tracked countries) never appear
+    here, since nothing in the account is classified as serving them yet -
+    that's the whole point of tracking them.
+    """
+    by_cluster = campaigns_by_cluster(campaigns, clusters, active_statuses=active_statuses)
+    grouped = {}
+    for topic in topic_keywords or []:
+        cluster_name = topic.get("cluster")
+        if cluster_name and by_cluster.get(cluster_name):
+            grouped[topic["name"]] = by_cluster[cluster_name]
+    return grouped
+
+
+def campaigns_matching_topic_name(campaigns, topic):
+    """Campaigns whose *name* matches this topic's own content patterns,
+    at any status - used for "tracked" topics (no `cluster` link, so
+    campaigns_by_topic() never finds them) to discover prior/dormant
+    campaigns for that country independent of live-campaign status.
+
+    Callers filter the returned list by status themselves (e.g. to split
+    into active vs. dormant) since this doesn't apply an active_statuses
+    filter the way campaigns_by_cluster/campaigns_by_topic do.
+    """
+    patterns = topic.get("match") or []
+    return [
+        campaign for campaign in campaigns
+        if any(p and re.search(p, campaign.get("name") or "", re.IGNORECASE) for p in patterns)
+    ]
+
+
+def classify_topic(text, topic_keywords, topic_campaigns):
+    """Classify a search term's country/topic signal, independent of the
+    campaign it's currently running in.
+
+    topic_campaigns: result of campaigns_by_topic() - topic name -> list of
+    live, active campaigns eligible as a re-home target.
+
+    Returns (classification, matched_topics):
+      - "none": no topic pattern matched the text
+      - "single": exactly one topic matched, and it has a live active
+        campaign to re-home to
+      - "tracked_no_campaign": exactly one topic matched, but no active
+        campaign exists for it (a tracked country, or a core topic whose
+        cluster's campaigns are all currently paused/removed)
+      - "ambiguous": 2+ distinct topics matched - conflicting signals
+    """
+    matched = match_topics(text, topic_keywords)
+    if not matched:
+        return "none", matched
+    if len(matched) > 1:
+        return "ambiguous", matched
+    topic = matched[0]
+    if topic_campaigns.get(topic):
+        return "single", matched
+    return "tracked_no_campaign", matched
 
 
 def write_csv(path, fieldnames, rows):
