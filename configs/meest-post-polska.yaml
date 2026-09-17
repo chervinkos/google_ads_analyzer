@@ -8,13 +8,32 @@ primary_conversion_name: "Parcels"
 thresholds:
   min_clicks: 2
   min_cost: 20
-  # Flat, period-independent floor for analyze_campaign_performance.py's
-  # quadrant classification - a campaign with fewer than this many Parcels
-  # conversions in the analysis period goes to "insufficient data" instead
-  # of being classified (or force-classified), since CAC is too noisy to
-  # trust below this volume. Deliberately NOT scaled to period length - a
-  # 7-day and a 90-day report apply the same floor.
-  min_conversions_for_quadrant: 10
+  # Period-proportional floor for analyze_campaign_performance.py's
+  # quadrant classification, expressed as a rate rather than a flat count -
+  # 10 Parcels conversions over a 2-week period is a fine, small-but-normal
+  # sample; the same 10 over 90 days is a persistently low rate, a real
+  # signal of a problem, not "not enough data yet". The script scales this
+  # to whatever custom period is selected: floor = round(this rate *
+  # period_days / 30), with a hard minimum of 3 (see
+  # MIN_QUADRANT_FLOOR_ABSOLUTE in analyze_campaign_performance.py) so a
+  # very short period still requires a few real data points. A campaign/
+  # cohort under the floor goes to "insufficient data", never dropped or
+  # force-classified.
+  min_conversions_per_30_days: 10
+  # How recently a campaign must have started (relative to the analysis
+  # period's end date) to be treated as "new" rather than "stagnant" when
+  # it lands in insufficient data - a new campaign below the floor has
+  # upside potential worth flagging differently from a long-running one
+  # that's simply stayed low-volume.
+  new_campaign_window_days: 30
+  # tCPA candidacy guidance for analyze_campaign_performance.py - these are
+  # adjustable assumptions, NOT hard rules from Google; actual stability
+  # requirements vary by account. min conversions/30 days is Google's own
+  # general guidance for stable Target CPA performance; the CAC-stability
+  # check is this toolkit's own proxy (period-over-comparison CAC swing),
+  # since a single two-period comparison can't measure true variance.
+  tcpa_min_conversions_per_30_days: 30
+  tcpa_cac_stability_pct: 30
 
 # Clusters to skip from campaign-performance quadrant scoring (they still
 # appear in raw per-campaign CSV output, just not classified/compared) -

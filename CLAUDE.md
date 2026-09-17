@@ -120,6 +120,48 @@ Each project/account has its own config file under `configs/`
   PAUSED or REMOVED campaign is never a valid reassignment target, only a
   cheaper-to-reactivate signal, so campaign status must always be pulled
   fresh via MCP (never cached) before running this analysis
+- `analyze_campaign_performance.py`'s quadrant-eligibility floor
+  (`thresholds.min_conversions_per_30_days` in config) is **proportional
+  to the selected period, not a flat count** — 10 Parcels conversions over
+  90 days is a real low-rate problem, not "just needs more data" the way
+  10 over 2 weeks would be. The script derives actual date ranges from
+  `--period-start`/`--period-end` (required, `YYYY-MM-DD`) rather than a
+  free-text label, computes `period_days` from them, and scales:
+  `floor = max(MIN_QUADRANT_FLOOR_ABSOLUTE, round(min_conversions_per_30_days
+  * period_days / 30))` (hard floor of 3, so a very short period still
+  needs a few real data points). A campaign under the floor is split by
+  `campaign_age_status()` into **new** (started within
+  `thresholds.new_campaign_window_days` of the period's *end* date — low
+  volume here is upside potential, not a problem), **stagnant** (older,
+  still below floor), or **unknown** (no usable `start_date` column in the
+  input CSV) — cohorts aren't split this way since a cohort mixes
+  campaigns of different ages, but its nested campaign lines are. Same
+  --target-start/--target-end pattern applies to `--benchmark target`'s
+  trailing window, and now that all three windows are real dates, an
+  overlap between --target and --comparison is a hard error, not just a
+  documented caution
+- `analyze_campaign_performance.py`'s quadrant classification stays
+  exactly 4 categories (Star/Efficient/Review/Underperformer) — conversion
+  rate (vs. the account's own average for the period) and Lost Impression
+  Share never enter that formula. They only feed `causal_note()`, a short
+  qualitative annotation shown *alongside* the quadrant label explaining
+  the likely "why" (e.g. "Underperformer — conv. rate 1.2% (below average)
+  → likely a traffic quality/offer issue, not budget" vs. "conv. rate 8%
+  (above average), Lost IS (budget): 34% → traffic is efficient but capped
+  by budget; increase budget rather than cutting" — same CAC-based
+  Underperformer label, very different fix). Do not read this as a hidden
+  8-cell quadrant; it's prose, not a second axis
+- `analyze_campaign_performance.py`'s tCPA candidacy recommendation
+  (`tcpa_recommendation()`) is a separate, per-campaign-only suggestion
+  built from the same CAC/volume data, using
+  `thresholds.tcpa_min_conversions_per_30_days` (default 30 — Google's own
+  general guidance for stable Target CPA performance, scaled to the
+  period the same way the quadrant floor is) as the volume bar, plus a
+  period-over-comparison CAC swing beyond `thresholds.tcpa_cac_stability_pct`
+  as a stability proxy (a two-period comparison can't measure true
+  variance, just flag a swing big enough to be a caution). Both thresholds
+  are explicitly adjustable assumptions, not hard rules — state that when
+  presenting a tCPA recommendation, don't repeat it as settled guidance
 
 ## Scripts
 - `analyze_wasted_spend.py` — search-term waste analysis
@@ -137,9 +179,12 @@ Each project/account has its own config file under `configs/`
 - `analyze_campaign_performance.py` — campaign performance narrative report
   (v1, Ads-only): cohort (destination cluster) and nested campaign-level
   CAC × volume quadrant classification against a switchable benchmark
-  (cluster/account/target), with Lost Impression Share as a separate
-  diagnostic tag, output as a markdown narrative + CSV backups
-  (`--config configs/<project>.yaml --period file.csv --period-label "..." --comparison file.csv --comparison-label "..." [--benchmark cluster|account|target] [--target file.csv --target-label "..."] [--output file.md]`)
+  (cluster/account/target), a period-proportional insufficient-data floor
+  that splits low-volume campaigns into new/stagnant/unknown-age, a
+  causal-note layer (conversion rate vs. account average + Lost IS)
+  explaining *why* alongside each quadrant label, and a per-campaign tCPA
+  candidacy recommendation - output as a markdown narrative + CSV backups
+  (`--config configs/<project>.yaml --period file.csv --period-start YYYY-MM-DD --period-end YYYY-MM-DD --comparison file.csv --comparison-start YYYY-MM-DD --comparison-end YYYY-MM-DD [--benchmark cluster|account|target] [--target file.csv --target-start YYYY-MM-DD --target-end YYYY-MM-DD] [--output file.md]`)
 - `ads_common.py` — shared helpers (header-row detection, numeric
   cleanup, cluster/brand/intent/topic/quadrant matching) used by the
   scripts above

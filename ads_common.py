@@ -19,7 +19,7 @@ HEADER_HINTS = {
     "search term", "campaign", "campaign name", "ad group", "ad group name",
     "clicks", "cost", "conversions", "impressions", "keyword",
     "keyword text", "avg. cpc", "ctr", "status", "campaign status",
-    "channel type", "conv. value",
+    "channel type", "conv. value", "start date", "campaign start date",
 }
 
 # Candidate header labels per logical field, matched case-insensitively.
@@ -43,6 +43,7 @@ COLUMN_CANDIDATES = {
     "search_impression_share": ["search impr. share", "search impression share"],
     "lost_is_rank": ["search lost is (rank)", "search rank lost impression share", "lost is (rank)"],
     "lost_is_budget": ["search lost is (budget)", "search budget lost impression share", "lost is (budget)"],
+    "start_date": ["campaign start date", "start date"],
 }
 
 
@@ -397,7 +398,10 @@ def aggregate_campaign_metrics(records, cols):
     attribution pattern already used for search-term aggregation. In
     practice each campaign is expected to appear as a single row (already
     aggregated over the query's date range by the Google Ads API), so this
-    only matters as a defensive dedup.
+    only matters as a defensive dedup. start_date (if the column is
+    present) is constant per campaign, not a metric - the first non-empty
+    value seen is kept as-is (a raw ISO-ish date string; parsing/validating
+    it is the caller's job).
     """
     numeric_fields = ["impressions", "clicks", "cost", "conversions", "conversions_value",
                        "search_impression_share", "lost_is_rank", "lost_is_budget"]
@@ -410,7 +414,7 @@ def aggregate_campaign_metrics(records, cols):
             continue
         cost = clean_number(row.get(cols.get("cost", ""), ""), decimal_styles.get("cost"))
         agg = campaigns.setdefault(name, {
-            "campaign": name, "channel_type": "",
+            "campaign": name, "channel_type": "", "start_date": "",
             "impressions": 0.0, "clicks": 0.0, "cost": 0.0,
             "conversions": 0.0, "conversions_value": 0.0,
             "search_impression_share": None, "lost_is_rank": None, "lost_is_budget": None,
@@ -422,6 +426,10 @@ def aggregate_campaign_metrics(records, cols):
         agg["conversions"] += clean_number(row.get(cols.get("conversions", ""), ""), decimal_styles.get("conversions"))
         if "conversions_value" in cols:
             agg["conversions_value"] += clean_number(row.get(cols["conversions_value"], ""), decimal_styles.get("conversions_value"))
+        if not agg["start_date"] and "start_date" in cols:
+            # Constant per campaign (not a metric to aggregate) - take the
+            # first non-empty value seen, same as any other row would give.
+            agg["start_date"] = row.get(cols["start_date"], "").strip()
         if cost >= agg["_top_cost"]:
             agg["_top_cost"] = cost
             channel_type = row.get(cols.get("channel_type", ""), "").strip()

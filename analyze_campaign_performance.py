@@ -2,40 +2,61 @@
 """Campaign performance narrative report (v1: Ads-only, GA4 revenue merge
 is a later version, not built toward here).
 
-Classifies each cohort (destination cluster) - and, once the campaign-level
-nesting layer is added, each campaign within it - into a CAC x volume
-quadrant relative to a benchmark, using "Parcels" (config's
-primary_conversion_name) as the sole efficiency metric. Other conversion
-actions may appear in raw data but never drive scoring.
+Classifies each cohort (destination cluster) and each campaign within it
+into a CAC x volume quadrant relative to a benchmark, using "Parcels"
+(config's primary_conversion_name) as the sole efficiency metric. Other
+conversion actions may appear in raw data but never drive scoring.
 
-Quadrants (never a single composite score):
+Quadrants (never a single composite score - see causal_note() below for a
+qualitative explanation layer that sits *alongside* this, not inside it):
   Star                              - efficient (CAC <= target) AND high
                                        volume (conversions >= target)
   Efficient (underexploited)        - efficient, but below target volume
   Review (high spend, high volume)  - high volume, but not efficient
   Underperformer                    - neither efficient nor high volume
 
-A campaign/cohort with fewer than thresholds.min_conversions_for_quadrant
-Parcels conversions in the period goes to "insufficient data" instead of
-being classified either way - never silently dropped, never force-fit.
-Clusters in config's exclude_from_scoring (brand) are never classified,
-though they still appear in raw CSV output.
+Quadrant floor (thresholds.min_conversions_per_30_days in config) is
+proportional to the selected period, not flat: 10 Parcels conversions over
+90 days is a real low-rate signal, not "just needs more data" the way 10
+over 2 weeks would be. floor = max(MIN_QUADRANT_FLOOR_ABSOLUTE, round(rate
+* period_days / 30)). A cohort/campaign under the floor is "insufficient
+data" - never dropped, never force-classified. Below the floor, a campaign
+is further split by campaign_age_status() into new (started within
+thresholds.new_campaign_window_days of the period's end - low volume here
+is upside potential, not a problem) vs. stagnant (older, still below floor
+- worth a second look) vs. unknown (no usable start_date in the input).
+Clusters in config's exclude_from_scoring (brand) are never classified or
+age-split, though they still appear in raw CSV output.
 
-Lost Impression Share (rank/budget) is a separate diagnostic tag, never
-folded into the quadrant itself - it's attached alongside a classification
-as context on *why* (e.g. "Underperformer - Lost IS (budget): 34%").
+Lost Impression Share (rank/budget) and conversion rate (vs. the account
+average) never enter the quadrant formula itself - they only feed
+causal_note(), a short qualitative annotation attached *alongside* the
+quadrant label explaining the likely "why" (e.g. "Underperformer - conv.
+rate 1.2% (below average) -> likely a traffic quality/offer issue, not
+budget", or "Star - Lost IS (rank): 45% -> still room to grow if bids/
+quality improve"). Still exactly 4 quadrants - this is prose, not a fifth
+or sixth classification axis.
+
+tcpa_recommendation() is a separate, per-campaign-only suggestion (cohorts
+aren't bid strategies) on Target CPA candidacy, built from the same CAC/
+volume data: thresholds.tcpa_min_conversions_per_30_days (default 30,
+Google's general guidance for stable tCPA, scaled to the period like the
+quadrant floor) as the volume bar, plus a period-over-comparison CAC-swing
+check (thresholds.tcpa_cac_stability_pct) as a stability proxy. Both
+thresholds are explicitly adjustable assumptions, not hard rules - actual
+stability requirements vary by account.
 
 Benchmark modes (--benchmark):
   cluster  Peer-average within the immediate group: at the cohort layer
            that's all other scored cohorts (so identical to `account` at
-           this layer - the two modes only diverge once campaign-level
-           nesting is added, where `cluster` benchmarks a campaign against
-           its own cohort instead of the whole account).
+           this layer - the two modes only diverge at the campaign layer,
+           where `cluster` benchmarks a campaign against its own cohort
+           instead of the whole account).
   account  Whole-account scored peer average, current period.
   target   Trailing historical average from a separate --target pull (a
            window that must NOT overlap --comparison, or "target" and
-           "comparison" collapse into near-duplicate benchmarks - see
-           --target-label, which the caller must state explicitly).
+           "comparison" collapse into near-duplicate benchmarks - enforced
+           via --target-start/--target-end, not just a documented caution).
 
 All three benchmarks are weighted CAC (total cost / total conversions across
 the peer group) and mean volume (simple average of each member's
@@ -53,14 +74,15 @@ anywhere in it (rare).
 
 Usage:
     analyze_campaign_performance.py --config configs/<project>.yaml \\
-        --period period_metrics.csv --period-label "2026-08-17 to 2026-09-15" \\
-        --comparison comparison_metrics.csv --comparison-label "2026-07-18 to 2026-08-16" \\
+        --period period_metrics.csv --period-start 2026-08-17 --period-end 2026-09-15 \\
+        --comparison comparison_metrics.csv --comparison-start 2026-07-18 --comparison-end 2026-08-16 \\
         [--benchmark cluster|account|target] \\
-        [--target target_metrics.csv --target-label "..."] \\
+        [--target target_metrics.csv --target-start ... --target-end ...] \\
         [--output file.md]
 """
 import argparse
 import sys
+from datetime import date
 from pathlib import Path
 
 import ads_common as common
@@ -68,34 +90,87 @@ import ads_common as common
 REQUIRED_METRIC_COLUMNS = ["campaign", "cost", "conversions"]
 OPTIONAL_METRIC_COLUMNS = [
     "channel_type", "impressions", "clicks", "conversions_value",
-    "search_impression_share", "lost_is_rank", "lost_is_budget",
+    "search_impression_share", "lost_is_rank", "lost_is_budget", "start_date",
 ]
 COHORT_CSV_FIELDS = [
-    "cluster", "status", "quadrant", "lost_is_diagnostic", "suggested_action",
+    "cluster", "status", "quadrant", "causal_note", "lost_is_diagnostic", "suggested_action",
     "cost", "cost_change_pct", "conversions", "conversions_change_pct",
     "cac", "cac_change_pct", "conversions_value", "campaign_count",
 ]
 CAMPAIGN_CSV_FIELDS = [
-    "campaign", "cluster", "channel_type", "status", "quadrant", "lost_is_diagnostic", "suggested_action",
+    "campaign", "cluster", "channel_type", "status", "quadrant", "causal_note",
+    "lost_is_diagnostic", "suggested_action", "age_status", "age_days", "tcpa_recommendation",
     "cost", "cost_change_pct", "conversions", "conversions_change_pct",
     "cac", "cac_change_pct", "conversions_value",
 ]
+
+# Hard floor under the proportional quadrant-eligibility bar (thresholds.
+# min_conversions_per_30_days * period_days / 30) - protects a very short
+# custom period from letting 1 conversion count as "sufficient data".
+MIN_QUADRANT_FLOOR_ABSOLUTE = 3
+
+
+def _parse_date(parser, flag, value):
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        parser.error(f"{flag} must be an ISO date (YYYY-MM-DD), got {value!r}")
+
+
+def _ranges_overlap(start_a, end_a, start_b, end_b):
+    return start_a <= end_b and start_b <= end_a
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", required=True, help="Path to configs/<project>.yaml")
     parser.add_argument("--period", required=True, help="Campaign-metrics CSV for the analysis period")
-    parser.add_argument("--period-label", required=True, help='Actual date range analyzed, e.g. "2026-08-17 to 2026-09-15"')
+    parser.add_argument("--period-start", required=True, help="Analysis period start date, YYYY-MM-DD (inclusive)")
+    parser.add_argument("--period-end", required=True, help="Analysis period end date, YYYY-MM-DD (inclusive)")
     parser.add_argument("--comparison", required=True, help="Campaign-metrics CSV for the comparison period")
-    parser.add_argument("--comparison-label", required=True, help="Actual comparison date range")
+    parser.add_argument("--comparison-start", required=True, help="Comparison period start date, YYYY-MM-DD (inclusive)")
+    parser.add_argument("--comparison-end", required=True, help="Comparison period end date, YYYY-MM-DD (inclusive)")
     parser.add_argument("--benchmark", choices=["cluster", "account", "target"], default="cluster")
     parser.add_argument("--target", default=None, help="Campaign-metrics CSV for the trailing benchmark window (required with --benchmark target)")
-    parser.add_argument("--target-label", default=None, help="Actual trailing-window date range (required with --benchmark target)")
+    parser.add_argument("--target-start", default=None, help="Trailing benchmark window start date, YYYY-MM-DD (required with --benchmark target)")
+    parser.add_argument("--target-end", default=None, help="Trailing benchmark window end date, YYYY-MM-DD (required with --benchmark target)")
     parser.add_argument("--output", default=None, help="Markdown report path (default: <project>-campaign-performance.md)")
     args = parser.parse_args()
-    if args.benchmark == "target" and (not args.target or not args.target_label):
-        parser.error("--benchmark target requires both --target and --target-label")
+
+    args.period_start = _parse_date(parser, "--period-start", args.period_start)
+    args.period_end = _parse_date(parser, "--period-end", args.period_end)
+    args.comparison_start = _parse_date(parser, "--comparison-start", args.comparison_start)
+    args.comparison_end = _parse_date(parser, "--comparison-end", args.comparison_end)
+    args.target_start = _parse_date(parser, "--target-start", args.target_start)
+    args.target_end = _parse_date(parser, "--target-end", args.target_end)
+
+    if args.period_end < args.period_start:
+        parser.error("--period-end must not be before --period-start")
+    if args.comparison_end < args.comparison_start:
+        parser.error("--comparison-end must not be before --comparison-start")
+
+    if args.benchmark == "target" and (not args.target or not args.target_start or not args.target_end):
+        parser.error("--benchmark target requires --target, --target-start, and --target-end")
+    if args.target_start and args.target_end:
+        if args.target_end < args.target_start:
+            parser.error("--target-end must not be before --target-start")
+        # A target window that overlaps the comparison window makes the two
+        # benchmarks near-duplicates (see module docstring) - this used to
+        # be a documented caution only; now that both are real dates, it's
+        # an enforced check instead of something the caller has to remember.
+        if _ranges_overlap(args.target_start, args.target_end, args.comparison_start, args.comparison_end):
+            parser.error(
+                f"--target window ({args.target_start} to {args.target_end}) overlaps --comparison "
+                f"({args.comparison_start} to {args.comparison_end}) - pick a trailing window that "
+                f"doesn't, or 'target' and 'comparison' collapse into near-duplicate benchmarks"
+            )
+
+    args.period_label = f"{args.period_start} to {args.period_end}"
+    args.comparison_label = f"{args.comparison_start} to {args.comparison_end}"
+    args.target_label = f"{args.target_start} to {args.target_end}" if args.target_start else None
+    args.period_days = (args.period_end - args.period_start).days + 1
     return args
 
 
@@ -166,6 +241,98 @@ def cohort_weighted_lost_is(cohort):
     return avg_rank, avg_budget
 
 
+def conversion_rate(conversions, clicks):
+    if clicks and clicks > 0:
+        return conversions / clicks
+    return None
+
+
+def parse_iso_date(raw):
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def campaign_age_status(start_date_raw, period_end, new_campaign_window_days):
+    """('new'/'stagnant'/'unknown', age_days_or_None).
+
+    Age is measured to the analysis period's *end* date, not "today" - so
+    re-running the same report later against the same period always gives
+    the same answer, instead of a campaign quietly aging out of "new"
+    between two runs over the same historical window.
+    """
+    start = parse_iso_date(start_date_raw)
+    if start is None:
+        return "unknown", None
+    age_days = (period_end - start).days
+    if age_days < 0:
+        return "unknown", None  # start date after period end - bad data, don't guess
+    return ("new" if age_days <= new_campaign_window_days else "stagnant"), age_days
+
+
+CONV_RATE_BAND = 0.20  # relative deviation from account average treated as "below"/"above" rather than "near"
+
+
+def causal_note(quadrant, conv_rate, account_avg_conv_rate, lost_is_rank, lost_is_budget):
+    """Qualitative annotation alongside the quadrant label - explains *why*
+    using conversion rate (vs. the account average) and Lost IS, without
+    adding a new axis to the classification itself: still exactly the same
+    4 quadrants, just with a short explanation of what's likely driving
+    this one attached alongside the label.
+    """
+    if quadrant is None:
+        return None
+    threshold = common.LOST_IS_FLAG_THRESHOLD
+    rel = (conv_rate / account_avg_conv_rate) if (conv_rate is not None and account_avg_conv_rate) else None
+    cr_pct = f"{conv_rate * 100:.1f}%" if conv_rate is not None else None
+
+    if quadrant in ("Underperformer", "Review (high spend, high volume)"):
+        if rel is None:
+            return None  # no clicks data to compute a conversion rate - nothing to say
+        if rel < 1 - CONV_RATE_BAND:
+            return f"conv. rate {cr_pct} (below average) → likely a traffic quality/offer issue, not budget"
+        if rel > 1 + CONV_RATE_BAND:
+            if lost_is_budget is not None and lost_is_budget >= threshold:
+                return (f"conv. rate {cr_pct} (above average), Lost IS (budget): {lost_is_budget * 100:.0f}% "
+                        f"→ traffic is efficient but capped by budget; increase budget rather than cutting")
+            return f"conv. rate {cr_pct} (above average), but still inefficient on CAC → check offer/pricing/CPCs, not traffic quality"
+        return f"conv. rate {cr_pct} (near account average) → not a conversion-rate problem; check CPCs/bids"
+
+    # Star / Efficient (underexploited): economics are already good - explain headroom, if any.
+    if lost_is_rank is not None and lost_is_rank >= threshold:
+        return f"Lost IS (rank): {lost_is_rank * 100:.0f}% → still room to grow if bids/quality improve"
+    if lost_is_budget is not None and lost_is_budget >= threshold:
+        return f"Lost IS (budget): {lost_is_budget * 100:.0f}% → still room to grow with more budget"
+    if rel is not None and rel > 1 + CONV_RATE_BAND:
+        return f"conv. rate {cr_pct} (above average) → strong traffic quality backing the efficiency"
+    return None
+
+
+def tcpa_recommendation(conversions, cac, cac_change_pct, period_days, min_conversions_per_30_days, stability_pct):
+    """tCPA candidacy - an adjustable-assumption guideline, not a hard
+    rule: volume threshold defaults to Google's general ~30-conversions/
+    30-days guidance for stable Target CPA performance, scaled to the
+    selected period the same way the quadrant floor is. CAC "stability" is
+    this toolkit's own proxy (period-over-comparison CAC swing), since a
+    two-period comparison can't measure true variance - just a swing big
+    enough to be a caution flag.
+    """
+    if cac is None:
+        return None  # no conversions at all - nothing to recommend
+    required = max(1, round(min_conversions_per_30_days * period_days / 30))
+    if conversions < required:
+        return (f"Stay on manual/Enhanced CPC - insufficient volume for stable tCPA "
+                 f"({conversions:.0f}/{required} conversions needed at ~{min_conversions_per_30_days}/30 days)")
+    if cac_change_pct is not None and abs(cac_change_pct) > stability_pct:
+        return (f"Hold off on tCPA - volume is sufficient but CAC swung {cac_change_pct:+.0f}% vs. "
+                f"comparison (unstable); revisit once CAC settles")
+    return f"Good tCPA candidate - sufficient, stable volume ({conversions:.0f} conversions); consider tCPA around {cac:.2f}"
+
+
 def campaigns_by_cluster_list(campaigns_by_name, clusters, exclude_from_scoring):
     """Period campaigns grouped into lists per cluster, dropping clusters in
     exclude_from_scoring entirely (never a peer-group member, never scored)."""
@@ -179,7 +346,9 @@ def campaigns_by_cluster_list(campaigns_by_name, clusters, exclude_from_scoring)
 
 
 def classify_campaigns(period_campaigns, comparison_campaigns, clusters, exclude_from_scoring,
-                        min_conversions, benchmark_mode, cluster_targets, flat_target):
+                        min_conversions, benchmark_mode, cluster_targets, flat_target,
+                        account_avg_conv_rate, period_end, new_campaign_window_days,
+                        period_days, tcpa_min_conversions_per_30_days, tcpa_stability_pct):
     rows = []
     for name, m in period_campaigns.items():
         cluster = common.match_cluster(name, clusters)
@@ -206,14 +375,29 @@ def classify_campaigns(period_campaigns, comparison_campaigns, clusters, exclude
         conv_delta = pct_change(m["conversions"], comparison["conversions"]) if comparison else None
         cac_delta = pct_change(cac, comparison_cac) if (cac is not None and comparison_cac is not None) else None
 
+        conv_rate = conversion_rate(m["conversions"], m["clicks"])
+        note = causal_note(quadrant, conv_rate, account_avg_conv_rate,
+                            m.get("lost_is_rank"), m.get("lost_is_budget")) if status == "scored" else None
+
+        age, age_days = campaign_age_status(m.get("start_date", ""), period_end, new_campaign_window_days)
+
+        tcpa = None
+        if not excluded:
+            tcpa = tcpa_recommendation(m["conversions"], cac, cac_delta, period_days,
+                                        tcpa_min_conversions_per_30_days, tcpa_stability_pct)
+
         rows.append({
             "campaign": name,
             "cluster": cluster,
             "channel_type": m.get("channel_type", ""),
             "status": status,
             "quadrant": quadrant or "",
+            "causal_note": note or "",
             "lost_is_diagnostic": lost_is or "",
             "suggested_action": action or "",
+            "age_status": age,
+            "age_days": age_days if age_days is not None else "",
+            "tcpa_recommendation": tcpa or "",
             "cost": round(m["cost"], 2),
             "cost_change_pct": round(cost_delta, 1) if cost_delta is not None else "",
             "conversions": round(m["conversions"], 2),
@@ -232,7 +416,16 @@ def main():
     clusters = config.get("clusters", [])
     primary_conversion = config.get("primary_conversion_name", "conversions")
     exclude_from_scoring = set(config.get("exclude_from_scoring", []))
-    min_conversions = config.get("thresholds", {}).get("min_conversions_for_quadrant", 10)
+
+    thresholds = config.get("thresholds", {})
+    min_conversions_per_30_days = thresholds.get("min_conversions_per_30_days", 10)
+    new_campaign_window_days = thresholds.get("new_campaign_window_days", 30)
+    tcpa_min_conversions_per_30_days = thresholds.get("tcpa_min_conversions_per_30_days", 30)
+    tcpa_stability_pct = thresholds.get("tcpa_cac_stability_pct", 30)
+    # Proportional, not flat: 10 conversions over 90 days is a real low-rate
+    # signal, not "just needs more time" the way 10 over 2 weeks would be -
+    # see the config comment next to min_conversions_per_30_days.
+    min_conversions = max(MIN_QUADRANT_FLOOR_ABSOLUTE, round(min_conversions_per_30_days * args.period_days / 30))
 
     output_path = args.output or f"{project_name}-campaign-performance.md"
     cohort_csv_path = str(Path(output_path).with_suffix("")) + "-cohorts.csv"
@@ -247,6 +440,13 @@ def main():
     scored_period_cohorts = {n: c for n, c in period_cohorts.items() if not c["excluded"]}
     non_excluded_period_campaigns = [m for m in period_campaigns.values()
                                       if common.match_cluster(m["campaign"], clusters) not in exclude_from_scoring]
+
+    # Account-wide reference for the causal-note layer - always the current
+    # period's own account average, regardless of --benchmark mode (that
+    # flag only controls the CAC/volume quadrant target, a separate thing).
+    total_conv = sum(m["conversions"] for m in non_excluded_period_campaigns)
+    total_clicks = sum(m["clicks"] for m in non_excluded_period_campaigns)
+    account_avg_conv_rate = conversion_rate(total_conv, total_clicks)
 
     if args.benchmark == "target":
         target_campaigns = load_metrics_csv(args.target, "target")
@@ -304,10 +504,15 @@ def main():
         conv_delta = pct_change(cohort["conversions"], comparison["conversions"]) if comparison else None
         cac_delta = pct_change(cac, comparison_cac) if (cac is not None and comparison_cac is not None) else None
 
+        cohort_conv_rate = conversion_rate(cohort["conversions"], cohort["clicks"])
+        note = causal_note(quadrant, cohort_conv_rate, account_avg_conv_rate,
+                            lost_is_rank, lost_is_budget) if status == "scored" else None
+
         cohort_rows.append({
             "cluster": name,
             "status": status,
             "quadrant": quadrant or "",
+            "causal_note": note or "",
             "lost_is_diagnostic": lost_is or "",
             "suggested_action": action or "",
             "cost": round(cohort["cost"], 2),
@@ -325,6 +530,8 @@ def main():
     campaign_rows = classify_campaigns(
         period_campaigns, comparison_campaigns, clusters, exclude_from_scoring,
         min_conversions, args.benchmark, cluster_campaign_targets or {}, flat_campaign_target,
+        account_avg_conv_rate, args.period_end, new_campaign_window_days,
+        args.period_days, tcpa_min_conversions_per_30_days, tcpa_stability_pct,
     )
     campaign_rows.sort(key=lambda r: -r["cost"])
     common.write_csv(campaign_csv_path, CAMPAIGN_CSV_FIELDS, campaign_rows)
@@ -363,6 +570,13 @@ def fmt_delta(pct):
 CHANNEL_ORDER = {"SEARCH": 0, "PERFORMANCE_MAX": 1}
 
 
+AGE_LABELS = {
+    "new": "NEW campaign, upside potential",
+    "stagnant": "stagnant - running a while, still below floor",
+    "unknown": "start date unknown",
+}
+
+
 def render_campaign_lines(campaigns, primary_conversion, indent="  "):
     """Nested campaign detail for one cohort, grouped by channel type
     (Search, then PMax, then anything else alphabetically), sorted by cost
@@ -375,15 +589,22 @@ def render_campaign_lines(campaigns, primary_conversion, indent="  "):
         lines.append(f"{indent}**{channel.title().replace('_', ' ')}:**")
         for c in sorted(grouped[channel], key=lambda r: -r["cost"]):
             if c["status"] == "scored":
-                tag = f" — {c['lost_is_diagnostic']}" if c["lost_is_diagnostic"] else ""
+                tag = f" — {c['causal_note']}" if c["causal_note"] else ""
+                tcpa = f"\n{indent}  tCPA: {c['tcpa_recommendation']}" if c["tcpa_recommendation"] else ""
                 lines.append(
                     f"{indent}- `{c['campaign']}` — **{c['quadrant']}**{tag}: cost {c['cost']} "
                     f"({fmt_delta(c['cost_change_pct'])}), {primary_conversion} {c['conversions']} "
                     f"({fmt_delta(c['conversions_change_pct'])}), CAC {c['cac']} ({fmt_delta(c['cac_change_pct'])}) "
-                    f"— {c['suggested_action']}"
+                    f"— {c['suggested_action']}{tcpa}"
                 )
             elif c["status"] == "insufficient_data":
-                lines.append(f"{indent}- `{c['campaign']}` — insufficient data: {c['conversions']} {primary_conversion}, cost {c['cost']}")
+                age_note = AGE_LABELS.get(c["age_status"], c["age_status"])
+                if c["age_days"] != "":
+                    age_note += f", {c['age_days']}d old"
+                lines.append(
+                    f"{indent}- `{c['campaign']}` — insufficient data ({age_note}): "
+                    f"{c['conversions']} {primary_conversion}, cost {c['cost']}"
+                )
             else:
                 lines.append(f"{indent}- `{c['campaign']}` — excluded: cost {c['cost']}, {c['conversions']} {primary_conversion}")
     return lines
@@ -400,8 +621,9 @@ def render_report(project_name, args, primary_conversion, min_conversions,
     if target_cac is not None:
         lines.append(f"**Benchmark target:** CAC ≤ {target_cac:.2f}, volume ≥ {target_volume:.1f} {primary_conversion} conversions")
     lines.append(f"**Efficiency metric:** {primary_conversion} conversions only (other conversion actions excluded from scoring)")
-    lines.append(f"**Quadrant floor:** cohorts/campaigns with fewer than {min_conversions} {primary_conversion} "
-                  f"conversions in the period are \"insufficient data\", not classified either way")
+    lines.append(f"**Quadrant floor:** {min_conversions} {primary_conversion} conversions for this {args.period_days}-day "
+                  f"period (proportional, not flat - see thresholds.min_conversions_per_30_days in config); below it, "
+                  f"a cohort/campaign is \"insufficient data\", not classified either way")
     lines.append("")
 
     scored = [r for r in cohort_rows if r["status"] == "scored"]
@@ -425,7 +647,7 @@ def render_report(project_name, args, primary_conversion, min_conversions,
     lines.append("")
     if scored:
         for r in scored:
-            tag = f" — {r['lost_is_diagnostic']}" if r["lost_is_diagnostic"] else ""
+            tag = f" — {r['causal_note']}" if r["causal_note"] else ""
             lines.append(f"### {r['cluster']} — {r['quadrant']}{tag}")
             lines.append(f"- Cost: {r['cost']} ({fmt_delta(r['cost_change_pct'])} vs. comparison)")
             lines.append(f"- {primary_conversion} conversions: {r['conversions']} ({fmt_delta(r['conversions_change_pct'])})")
