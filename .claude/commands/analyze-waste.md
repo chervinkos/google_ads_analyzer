@@ -20,14 +20,21 @@ Pipeline:
    terms report UI: real individual query text, "Performance Max" match
    type, full cost/click/impression metrics — same shape as
    `search_term_view`, not the separate category-aggregated
-   `campaign_search_term_insight` resource). Merging it in is a
-   straightforward union with the Search-campaign pull — same
-   term/cost/conversion shape, just sourced from two resources depending
-   on campaign type, no category-label handling needed. Still confirm
-   the exact field names on `campaign_search_term_view` with
-   `metadata_get_resource_metadata` before wiring up the fetch, the same
-   way cluster patterns were checked against real campaign names rather
-   than assumed. Until this merge is implemented, PMax campaigns are
+   `campaign_search_term_insight` resource). This is NOT a straightforward
+   union with the Search-campaign pull: `campaign_search_term_view`
+   returns rows for every campaign type, not just PMax (confirmed
+   2026-09-15 — 959 of 2,919 rows in an unfiltered pull were duplicate
+   Search-campaign data), and the resource has no
+   `campaign.advertising_channel_type` field of its own to filter on
+   in-query. Per CLAUDE.md's "Known technical notes", first query the
+   `campaign` resource for `advertising_channel_type = 'PERFORMANCE_MAX'`
+   to get this account's PMax campaign resource names, then filter
+   `campaign_search_term_view.campaign IN (<those resource names>)`
+   before merging — otherwise Search-campaign spend gets double-counted.
+   Still confirm the exact field names on `campaign_search_term_view`
+   with `metadata_get_resource_metadata` before wiring up the fetch, the
+   same way cluster patterns were checked against real campaign names
+   rather than assumed. Until this merge is implemented, PMax campaigns are
    absent from waste analysis even though they may carry real spend —
    flag this explicitly in the summary presented to the user rather than
    silently omitting them.
