@@ -2,19 +2,31 @@
 """Search-term opportunity / pattern discovery.
 
 Compares a trailing window against a baseline window (plus the current
-active keyword list) to flag search terms worth acting on, across four
+active keyword list) to flag search terms worth acting on, across three
 independent signal types:
 
   - new_demand:      falls to the catch-all cluster AND doesn't match any
                       other cluster's keywords by content either
-  - intent_pattern:  matches one or more of the config's intent_keywords
-                      (independent of geographic cluster)
   - underexploited:  strong conversion rate / low CAC, not yet an active
                       keyword
   - rising_trend:    meaningfully higher volume trailing vs. baseline
 
 A term can carry multiple signals at once; all are reported together with
 a suggested action.
+
+Added/Excluded status (term_status - NOT yet live-verified as available
+via the Google Ads MCP connector, see CLAUDE.md's Known technical notes)
+is handled differently per signal, not as a blanket filter:
+  - underexploited genuinely requires it - a term already Added as a
+    keyword (in any campaign it appears in) isn't underexploited by
+    definition, so it's excluded from this signal entirely.
+  - new_demand and rising_trend are never filtered by it - a rising-
+    trend term that's currently Excluded is a "reconsider this decision"
+    signal worth surfacing, not noise to hide. term_status is included
+    as a context column for these instead.
+Until the column is confirmed available and wired into the input CSVs,
+every row's term_status is "none" and this logic is inert (matches prior
+behavior exactly).
 
 Usage:
     analyze_search_opportunities.py --config configs/<project>.yaml \\
@@ -28,9 +40,9 @@ from pathlib import Path
 
 import ads_common as common
 
-TERM_COLUMNS = ["search_term", "campaign", "clicks", "cost", "conversions"]
+TERM_COLUMNS = ["search_term", "campaign", "clicks", "cost", "conversions", "term_status"]
 OUTPUT_FIELDS = [
-    "search_term", "campaign", "cluster", "brand_term",
+    "search_term", "campaign", "cluster", "brand_term", "term_status",
     "clicks", "cost", "conversions", "cpa",
     "baseline_clicks", "growth_pct",
     "signals", "suggested_action",
@@ -38,7 +50,6 @@ OUTPUT_FIELDS = [
 
 SUGGESTED_ACTIONS = {
     "new_demand": "Consider a new cluster/campaign for this term",
-    "intent_pattern": "Route to an intent-specific ad group or landing page",
     "underexploited": "Add as an exact-match keyword",
     "rising_trend": "Increase bid/budget for this term",
 }
@@ -90,17 +101,27 @@ def aggregate_by_term(records, cols):
         cost = common.clean_number(row.get(cols["cost"]), decimal_styles.get("cost"))
         conversions = common.clean_number(row.get(cols["conversions"]), decimal_styles.get("conversions")) if "conversions" in cols else 0.0
 
+        status = common.normalize_term_status(row.get(cols.get("term_status", ""), "")) if "term_status" in cols else "none"
+
         key = search_term.lower()
         agg = terms.setdefault(key, {
             "search_term": search_term, "campaign": campaign, "top_cost": -1.0,
             "clicks": 0.0, "cost": 0.0, "conversions": 0.0,
+            "term_status": "none", "added_anywhere": False,
         })
         agg["clicks"] += clicks
         agg["cost"] += cost
         agg["conversions"] += conversions
+        # "Added anywhere" (not just in the top-cost campaign) is what
+        # actually disqualifies underexploited - a term already an active
+        # exact-match keyword in any campaign it runs in isn't
+        # underexploited there, regardless of which campaign is top-cost.
+        if status in ("added", "added_excluded"):
+            agg["added_anywhere"] = True
         if cost > agg["top_cost"]:
             agg["top_cost"] = cost
             agg["campaign"] = campaign
+            agg["term_status"] = status  # representative status for the context column
     return terms
 
 
@@ -110,7 +131,6 @@ def main():
     project_name = config.get("project_name", "project")
     clusters = config.get("clusters", [])
     brand_keywords = config.get("brand_keywords", [])
-    intent_keywords = config.get("intent_keywords", [])
     cluster_keywords = common.flattened_cluster_keywords(clusters)
 
     catch_all_names = {c["name"] for c in clusters if c.get("match_campaign_name") == "catch-all"}
@@ -161,7 +181,8 @@ def main():
 
         cluster = common.match_cluster(campaign, clusters)
         is_brand = common.matches_any_keyword(search_term, brand_keywords)
-        intents = common.match_intents(search_term, intent_keywords)
+        term_status = term.get("term_status", "none")
+        added_anywhere = term.get("added_anywhere", False)
 
         baseline = baseline_terms.get(key)
         baseline_clicks = baseline["clicks"] if baseline else 0.0
@@ -175,12 +196,10 @@ def main():
         if cluster in catch_all_names and not common.matches_any_keyword(search_term, cluster_keywords):
             signals.append("new_demand")
 
-        if intents:
-            signals.append("intent_pattern")
-
         if (conversions >= args.min_conversions and avg_cpa is not None
                 and cpa is not None and cpa <= avg_cpa * args.max_cac_ratio
-                and search_term.lower() not in active_keywords):
+                and search_term.lower() not in active_keywords
+                and not added_anywhere):
             signals.append("underexploited")
 
         is_new_with_volume = baseline_clicks == 0 and clicks >= args.min_trend_clicks
@@ -200,13 +219,14 @@ def main():
             "campaign": campaign,
             "cluster": cluster,
             "brand_term": is_brand,
+            "term_status": term_status,
             "clicks": clicks,
             "cost": round(cost, 2),
             "conversions": conversions,
             "cpa": round(cpa, 2) if cpa is not None else "",
             "baseline_clicks": baseline_clicks,
             "growth_pct": round(growth_pct, 1) if growth_pct is not None else ("new" if is_new_with_volume else ""),
-            "signals": ";".join(signals + (intents if "intent_pattern" in signals else [])),
+            "signals": ";".join(signals),
             "suggested_action": "; ".join(SUGGESTED_ACTIONS[s] for s in signals),
         })
 

@@ -26,6 +26,18 @@ live ENABLED campaign is) - it only changes the tracked_no_campaign
 suggested action from "new campaign candidate" to "evaluate/reactivate
 existing campaign".
 
+Added/Excluded status (term_status - NOT yet live-verified as available
+via the Google Ads MCP connector, see CLAUDE.md's Known technical notes)
+refines the "single" mismatch suggestion two ways: if the term is already
+Excluded in its current (wrong) campaign, the mismatch is noted without
+repeating a redundant action - Google is already suppressing it there, so
+re-homing isn't urgent. If the term is already Added as a keyword in one
+of the re-home target campaigns, that's noted alongside the suggestion
+("already present in the correct campaign"). Until the column is
+confirmed available, every row's term_status is "none" and this logic is
+inert (falls through to the plain re-home suggestion, matching prior
+behavior exactly).
+
 Usage:
     analyze_topic_alignment.py --config configs/<project>.yaml
         --input search_terms.csv --campaigns campaigns.csv [--output file.csv]
@@ -40,7 +52,7 @@ REQUIRED_TERM_COLUMNS = ["search_term", "campaign"]
 REQUIRED_CAMPAIGN_COLUMNS = ["campaign", "status"]
 OUTPUT_FIELDS = [
     "search_term", "campaign", "ad_group", "current_cluster",
-    "matched_topics", "classification", "suggested_action",
+    "matched_topics", "classification", "term_status", "suggested_action",
     "clicks", "cost", "conversions",
 ]
 
@@ -71,7 +83,29 @@ def load_campaigns(path):
     ]
 
 
-def suggest_action(classification, matched_topics, current_cluster, topic_campaigns_active, topics_by_name, campaigns):
+def build_term_campaign_status(records, cols):
+    """(search_term.lower(), campaign) -> normalized term_status, scanning
+    every row - not just the one currently being classified - since this
+    is used to check whether a term is already Added as a keyword in a
+    *different* campaign than the one a given row happens to be in (e.g.
+    a mismatch's re-home target). Empty when term_status isn't a resolved
+    column at all (not yet live-verified as available - see CLAUDE.md),
+    so the lookup is harmlessly inert until then.
+    """
+    lookup = {}
+    if "term_status" not in cols:
+        return lookup
+    for row in records:
+        term = row.get(cols["search_term"], "").strip().lower()
+        campaign = row.get(cols["campaign"], "").strip()
+        status = common.normalize_term_status(row.get(cols["term_status"], ""))
+        if term and campaign and status != "none":
+            lookup[(term, campaign)] = status
+    return lookup
+
+
+def suggest_action(classification, matched_topics, current_cluster, topic_campaigns_active, topics_by_name,
+                    campaigns, search_term, campaign, own_term_status, term_campaign_status):
     if classification == "ambiguous":
         return f"ambiguous - manual review (matched: {', '.join(matched_topics)})"
 
@@ -80,7 +114,21 @@ def suggest_action(classification, matched_topics, current_cluster, topic_campai
         targets = sorted({c["name"] for c in topic_campaigns_active.get(topic_name, [])})
         if current_cluster == topic_name:
             return "correctly homed"
-        return f"re-home to existing {topic_name} campaign(s): {'; '.join(targets)}"
+
+        if own_term_status in ("excluded", "added_excluded"):
+            # Google is already suppressing this term here - re-homing
+            # would help, but there's no urgent negative-keyword action
+            # left to take in the meantime, so don't repeat one.
+            return f"already excluded here ({campaign}) - mismatch noted, no negative-keyword action needed"
+
+        action = f"re-home to existing {topic_name} campaign(s): {'; '.join(targets)}"
+        already_added = sorted({
+            t for t in targets
+            if term_campaign_status.get((search_term.lower(), t)) in ("added", "added_excluded")
+        })
+        if already_added:
+            action += f" (already present as a keyword in: {'; '.join(already_added)})"
+        return action
 
     if classification == "tracked_no_campaign":
         topic_name = matched_topics[0]
@@ -132,7 +180,7 @@ def main():
     if not records:
         sys.exit(f"No data rows found in {args.input}")
 
-    cols = common.resolve_columns(records[0].keys(), REQUIRED_TERM_COLUMNS + ["ad_group", "clicks", "cost", "conversions"])
+    cols = common.resolve_columns(records[0].keys(), REQUIRED_TERM_COLUMNS + ["ad_group", "clicks", "cost", "conversions", "term_status"])
     missing = [c for c in REQUIRED_TERM_COLUMNS if c not in cols]
     if missing:
         sys.exit(f"Could not find required column(s) {missing} in {args.input} "
@@ -141,6 +189,7 @@ def main():
     # Resolved once per numeric column, not per cell - see
     # infer_decimal_style() in ads_common.py.
     decimal_styles = common.resolve_decimal_styles(records, cols, ["clicks", "cost", "conversions"])
+    term_campaign_status = build_term_campaign_status(records, cols)
 
     classified, unclassified = [], []
     tally = {}
@@ -162,6 +211,7 @@ def main():
         clicks = common.clean_number(row.get(cols.get("clicks", ""), ""), decimal_styles.get("clicks"))
         cost = common.clean_number(row.get(cols.get("cost", ""), ""), decimal_styles.get("cost"))
         conversions = common.clean_number(row.get(cols.get("conversions", ""), ""), decimal_styles.get("conversions"))
+        own_term_status = common.normalize_term_status(row.get(cols.get("term_status", ""), "")) if "term_status" in cols else "none"
 
         classified.append({
             "search_term": search_term,
@@ -170,9 +220,11 @@ def main():
             "current_cluster": current_cluster,
             "matched_topics": "; ".join(matched_topics),
             "classification": classification,
+            "term_status": own_term_status,
             "suggested_action": suggest_action(
                 classification, matched_topics, current_cluster,
                 topic_campaigns_active, topics_by_name, campaigns,
+                search_term, campaign, own_term_status, term_campaign_status,
             ),
             "clicks": clicks,
             "cost": round(cost, 2),

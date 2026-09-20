@@ -20,6 +20,7 @@ HEADER_HINTS = {
     "clicks", "cost", "conversions", "impressions", "keyword",
     "keyword text", "avg. cpc", "ctr", "status", "campaign status",
     "channel type", "conv. value", "start date", "campaign start date",
+    "added/excluded",
 }
 
 # Candidate header labels per logical field, matched case-insensitively.
@@ -44,6 +45,13 @@ COLUMN_CANDIDATES = {
     "lost_is_rank": ["search lost is (rank)", "search rank lost impression share", "lost is (rank)"],
     "lost_is_budget": ["search lost is (budget)", "search budget lost impression share", "lost is (budget)"],
     "start_date": ["campaign start date", "start date"],
+    # NOT yet live-verified as available via the Google Ads MCP connector
+    # (search_term_view.status / campaign_search_term_view - see CLAUDE.md's
+    # Known technical notes) - a distinct logical field from "status"
+    # (campaign ENABLED/PAUSED/REMOVED) on purpose, so resolving one never
+    # collides with the other even though "status" is included here as a
+    # plausible raw header text too.
+    "term_status": ["added/excluded", "search term status", "keyword status", "status"],
 }
 
 
@@ -238,6 +246,31 @@ def is_missing(value):
     return text == "" or text == PLACEHOLDER
 
 
+def normalize_term_status(raw):
+    """Normalize a raw Added/Excluded cell into one of "added", "excluded",
+    "added_excluded", "none".
+
+    Tolerant of exact wording (substring match on "add"/"exclud") rather
+    than an exact-value lookup, since the real export format hasn't been
+    live-verified yet (see CLAUDE.md's Known technical notes) - this is
+    deliberately permissive so whatever the actual column text turns out
+    to be, common variants ("Added", "Excluded", "Added/Excluded") all
+    resolve correctly without needing a code change once verified.
+    """
+    text = (raw or "").strip().lower()
+    if not text or text == PLACEHOLDER:
+        return "none"
+    has_added = "add" in text
+    has_excluded = "exclud" in text
+    if has_added and has_excluded:
+        return "added_excluded"
+    if has_added:
+        return "added"
+    if has_excluded:
+        return "excluded"
+    return "none"
+
+
 def match_cluster(campaign_name, clusters):
     """First-match-wins cluster assignment by campaign-name regex match,
     falling back to the config's catch-all cluster.
@@ -264,17 +297,6 @@ def match_cluster(campaign_name, clusters):
 def matches_any_keyword(text, keywords):
     text = text or ""
     return any(kw and re.search(kw, text, re.IGNORECASE) for kw in keywords)
-
-
-def match_intents(text, intent_keywords):
-    """Independent axis from cluster matching: a term can match multiple
-    intents (or none), regardless of its geographic cluster."""
-    text_lower = (text or "").lower()
-    matched = []
-    for intent in intent_keywords or []:
-        if any(kw.lower() in text_lower for kw in intent.get("match", [])):
-            matched.append(intent["name"])
-    return matched
 
 
 def flattened_cluster_keywords(clusters):

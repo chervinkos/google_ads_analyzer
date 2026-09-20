@@ -206,19 +206,58 @@ Each project/account has its own config file under `configs/`
   variance, just flag a swing big enough to be a caution). Both thresholds
   are explicitly adjustable assumptions, not hard rules — state that when
   presenting a tCPA recommendation, don't repeat it as settled guidance
+- **Added/Excluded search-term status (`term_status`) is implemented but
+  NOT YET LIVE-VERIFIED** — built 2026-09-20 against `search_term_view`'s
+  documented `status` field (ADDED/EXCLUDED/ADDED_EXCLUDED/NONE per the
+  Google Ads API), but the Google Ads MCP Connector wasn't available in
+  that session to confirm it's actually selectable via
+  `metadata_get_resource_metadata`, or that `campaign_search_term_view`
+  (the PMax path) carries anything equivalent - **confirm this before
+  relying on it in a real run**. `ads_common.normalize_term_status()`
+  is deliberately tolerant of exact wording (substring match on "add"/
+  "exclud") for this reason. Until verified and wired into a pull,
+  `term_status` is simply absent from input CSVs and every dependent
+  script falls back to its prior (pre-term_status) behavior exactly -
+  this is safe to leave unverified for a while, not a blocker.
+  Handling differs by script/signal, not a blanket filter:
+    - `analyze_wasted_spend.py`: deliberately ignores it entirely - a
+      term burning budget without conversions is worth flagging whether
+      or not it's technically already Excluded (exclusion may not be
+      working, or may not be live yet).
+    - `analyze_topic_alignment.py`'s mismatch signal: if a term is
+      already Excluded in the (wrong) campaign it's flagged in, the
+      suggestion becomes "already excluded here" instead of repeating
+      a re-home ask that's no longer urgent (Google's already
+      suppressing it there). If it's already Added as a keyword in one
+      of the re-home target campaigns, that's noted alongside the
+      suggestion ("already present as a keyword in: ...").
+    - `analyze_search_opportunities.py`: a real filter for
+      `underexploited` only (a term already Added, in ANY campaign it
+      appears in, isn't underexploited by definition - excluded from
+      that signal entirely). Never filters `new_demand` or
+      `rising_trend` - a rising-trend term that's currently Excluded is
+      a "reconsider this decision" signal worth surfacing, not noise to
+      hide, so it's included as a context column there instead.
+- `intent_pattern` (a signal in `analyze_search_opportunities.py`) and
+  its supporting config section (`intent_keywords`) and helper
+  (`ads_common.match_intents`) were removed 2026-09-20 - it never had a
+  clearly defined classification rule, no real business use case
+  surfaced across this project, and its distinction from `new_demand`
+  was never clear. The remaining three signals (`new_demand`,
+  `underexploited`, `rising_trend`) are considered sufficient
 
 ## Scripts
 - `analyze_wasted_spend.py` — search-term waste analysis
   (`--config configs/<project>.yaml --input file.csv [--min-clicks N] [--min-cost N] [--output file.csv]`)
 - `analyze_search_opportunities.py` — search-term opportunity/pattern
-  discovery: new-demand, intent-pattern, underexploited high-performer,
-  and rising-trend signals
+  discovery: new-demand, underexploited high-performer, and rising-trend
+  signals, Added/Excluded-aware per signal (see Known technical notes)
   (`--config configs/<project>.yaml --trailing file.csv --baseline file.csv --keywords file.csv [--output file.csv]`)
 - `analyze_topic_alignment.py` — content-based topic (country/destination)
   classification vs. campaign-based clusters: flags mismatches (a term's
   content says one country, its campaign says another) with a re-home
-  suggestion, and surfaces real demand for tracked countries with no
-  dedicated campaign yet
+  suggestion (Added/Excluded-aware, see Known technical notes), and
+  surfaces real demand for tracked countries with no dedicated campaign yet
   (`--config configs/<project>.yaml --input file.csv --campaigns file.csv [--output file.csv]`)
 - `analyze_campaign_performance.py` — campaign performance narrative report
   (v1, Ads-only): cohort (destination cluster) and nested campaign-level
