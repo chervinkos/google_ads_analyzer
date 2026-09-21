@@ -275,35 +275,59 @@ Each project/account has its own config file under `configs/`
   embedded LLM call. `performance.account` is a new addition (v1 only had
   cohort/campaign levels) and is always a true account total, including
   `exclude_from_scoring` clusters - unlike the scored cohort/campaign peer
-  groups, which exclude them. NOT YET LIVE-VERIFIED: exercised only
-  against hand-built synthetic CSVs (all three benchmark modes, the
-  `--changes` path, single-campaign-cohort fallback) - joins the existing
-  backlog of regex/logic-verified-only items (term_status, the ported
-  topic_keywords patterns) - run it against a real MCP pull and sanity-
-  check the JSON before treating it as confirmed.
-- **Change-log gating (`analyze_campaign_performance.py`'s "What was
-  done" section and `correlation_flags`)**: gated on confirming the
-  Google Ads change-log resource (expected to be `change_event`) via
-  `metadata_get_resource_metadata` - retention limit, granularity, and
-  available fields are all unconfirmed as of 2026-09-21 (the Google Ads
-  MCP Connector was unavailable every time this was attempted this
-  session). This is a harder gate than most "not yet live-verified"
-  items in this file: the rest of v2 is built on reasonable, testable
-  assumptions and just needs a live run to confirm, but the
-  correlation-matching logic in `build_correlation_flags()` literally
-  cannot be written correctly without knowing `change_event`'s fields
-  first, so it's left as a stub (always returns `[]`) with the call site
-  wired into both the cohort and campaign loops, not a best-guess
-  implementation. `what_was_done` stays `{"status": "not_available"}`
-  unless the caller passes `--changes <csv>` (see
-  `load_change_events()` - reads a plain header row directly rather than
-  `ads_common.load_table()`'s Google-Ads-UI-export header detection,
-  since a change-log pull isn't that kind of export and its real column
-  names aren't confirmed yet). Once the resource is confirmed: (1) wire
-  the actual MCP pull into `/performance-report`'s step 4, (2) implement
-  real matching in `build_correlation_flags()`, (3) update
-  `load_change_events()`'s column-guessing if the real field names don't
-  match its current date/campaign/change_type/description guesses.
+  groups, which exclude them. Two real bugs found and fixed 2026-09-21 in
+  a parallel live-verification session (details reported back, applied
+  here since that session's own uncommitted edits lived only in its local
+  worktree and were never pushed): (1) `campaign.start_date_time` comes
+  back as a full datetime ("2025-06-26 14:12:39"), not a bare date -
+  `parse_iso_date()` now takes the date part before parsing, where it
+  used to reject every real value and silently push every campaign into
+  `campaign_age_status()`'s "unknown" bucket; (2) see "Change-log schema"
+  below for the `change_event` wiring. STILL NOT LIVE-VERIFIED end-to-end
+  from *this* session: exercised only against hand-built synthetic CSVs
+  (all three benchmark modes, single-campaign-cohort fallback, the fixed
+  `--changes`/correlation-flags path with the confirmed schema) - the
+  parallel session did report a live PASS on the pre-schema-fix version
+  (all 3 benchmark modes, account rollup, CAC/quadrant/causal-note/tCPA
+  math, hand-verified against a real pull), but the change_event wiring
+  and the start_date_time fix specifically have only been synthetic-
+  tested here, not run against a live pull yet - confirm both once MCP
+  access lines up with a fresh run of this exact code.
+- **Change-log schema (`change_event`, confirmed 2026-09-21)**: confirmed
+  live via `metadata_get_resource_metadata` + real pulls in a parallel
+  verification session (this session's own Google Ads MCP Connector was
+  unavailable throughout, consistent with this project's one-session-at-
+  a-time MCP auth). Retrospective, but hard-capped to a **rolling ~29-day
+  window from query time** (a start date exactly 30 days back is
+  rejected: "requested start date is too old") - independent of whatever
+  `--period-start`/`--period-end` a report passes, so a change-log pull
+  is only possible when the analysis period overlaps roughly the
+  trailing month. Fields: `change_date_time`, `change_resource_type`,
+  `resource_change_operation`, `campaign`, `ad_group`, `changed_fields`,
+  `old_resource`, `new_resource`, `user_email`, `client_type`,
+  `resource_name`. Sortable only on `change_date_time`/
+  `change_resource_type`/`resource_change_operation`/`user_email` - not
+  `resource_name`, same pagination gotcha as `search_term_view`.
+  Granularity: campaign-scoped changes carry a non-empty `campaign`
+  field; ad-group/ad/keyword-scoped changes carry only `ad_group` (no
+  campaign field) - there's no dedicated keyword/criterion field, so a
+  specific keyword change is only identifiable via `changed_fields`/
+  `old_resource`/`new_resource` on an `AD_GROUP_CRITERION`-typed event.
+  `analyze_campaign_performance.py`'s `build_correlation_flags()` now
+  does real matching (previously a stub) - `load_change_events()` reads
+  this confirmed schema directly (previously a generic column guess) and
+  `changes_in_window()` filters to `[--comparison-start, --period-end]`
+  before matching. **Real, documented limitation, not an oversight**:
+  correlation only covers campaign-scoped changes - ad-group/ad/keyword-
+  scoped changes still appear in `what_was_done`'s raw change list but
+  aren't matched to any cluster/campaign, since this script has no
+  ad_group → campaign mapping wired in (a different join than the
+  search-term scripts already do, for a different reason). `--changes`
+  is still how the script receives change data (it has no MCP access
+  itself, same as every other script here) - `/performance-report`'s job
+  is to do the live pull and hand it a CSV in the confirmed shape; that
+  live-pull wiring in the command itself is documented but not yet run
+  end-to-end (see the v2-architecture bullet above).
 
 ## Scripts
 - `analyze_wasted_spend.py` — search-term waste analysis
@@ -330,9 +354,11 @@ Each project/account has its own config file under `configs/`
   top-by-metric next-step rankings. Emits one structured JSON file (no
   markdown narrative - that's composed by Claude Code from the JSON, see
   `/performance-report`) plus `-cohorts.csv`/`-campaigns.csv` backups. An
-  optional `--changes` CSV populates the "what was done" section and
-  enables `correlation_flags`, both otherwise gated - see Known technical
-  notes' "Change-log gating"
+  optional `--changes` CSV (confirmed `change_event` schema) populates
+  the "what was done" section and drives real `correlation_flags`
+  matching for campaign-scoped changes - see Known technical notes'
+  "Change-log schema" for the field list and the ad-group-scope
+  limitation
   (`--config configs/<project>.yaml --period file.csv --period-start YYYY-MM-DD --period-end YYYY-MM-DD --comparison file.csv --comparison-start YYYY-MM-DD --comparison-end YYYY-MM-DD [--benchmark cluster|account|target] [--target file.csv --target-start YYYY-MM-DD --target-end YYYY-MM-DD] [--changes file.csv] [--output file.json]`)
 - `ads_common.py` — shared helpers (header-row detection, numeric
   cleanup, cluster/brand/intent/topic/quadrant matching) used by the
@@ -381,7 +407,18 @@ reattempted from scratch:
   scaling conclusions with actual revenue/margin signal instead of Ads-
   only conversion count. Not started - no GA4 MCP access confirmed yet,
   no schema investigation done.
-- **Change-log resource (`change_event`) investigation**: see Known
-  technical notes' "Change-log gating" - blocks `/performance-report`'s
-  "What was done" section and `correlation_flags` specifically, not the
-  rest of the toolkit.
+- **`change_event` live-pull wiring into `/performance-report` itself**:
+  the resource's schema is confirmed and `analyze_campaign_performance.py`
+  consumes it correctly (see Known technical notes' "Change-log schema"),
+  but `/performance-report`'s step 4 (checking the ~29-day retention
+  window, running the actual MCP pull, building the `--changes` CSV) is
+  documented, not yet exercised end-to-end against a live account - do
+  that before treating "What was done" as fully working, not just its
+  schema as confirmed.
+- **Ad-group/ad/keyword-scoped change correlation**: `correlation_flags`
+  only matches campaign-scoped `change_event` rows (see "Change-log
+  schema") - an ad-group→campaign mapping would extend real correlation
+  coverage to ad copy edits and keyword-level changes, the way the
+  search-term scripts already join ad_group→campaign for a different
+  reason. Not built - these changes currently only surface as unmatched
+  rows in `what_was_done`'s raw list, for Claude Code to notice in prose.

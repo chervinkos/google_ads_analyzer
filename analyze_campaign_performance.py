@@ -19,11 +19,10 @@ Report structure (the JSON mirrors this):
                            paused campaigns, ad group/asset group changes,
                            ad copy edits, budget changes, bid strategy/
                            target changes, geo/keyword/audience changes.
-                           No analysis, just facts. STATUS: gated - see
-                           "Change-log gating" below. Always emits
-                           {"status": "not_available", "changes": []}
-                           until that gate clears, unless --changes is
-                           passed (see load_change_events()).
+                           No analysis, just facts. Populated only if the
+                           caller supplies --changes - see "Change-log
+                           schema" below - otherwise emits
+                           {"status": "not_available", "changes": []}.
   2. performance         - account-level before/after, then the same
                            breakdown per cluster (cohort), then per-campaign
                            within each cluster - CAC x volume quadrant
@@ -32,30 +31,47 @@ Report structure (the JSON mirrors this):
                            conversion rate and Lost IS as diagnostics, and a
                            correlation_flags list per cluster/campaign
                            cross-referencing what_was_done's changes against
-                           that entity's performance shift (see
-                           build_correlation_flags() - also gated, see
-                           below).
+                           that entity's performance shift - see
+                           build_correlation_flags() and its real
+                           limitation (campaign-scoped changes only).
   3. next_steps          - scale/cut/edit candidates and top-by-metric
                            rankings, derived from the same quadrant data,
                            at both the cluster and campaign level.
 
-Change-log gating (CLAUDE.md's Known technical notes / Planned section):
-  The correlation logic in build_correlation_flags() is NOT implemented -
-  it always returns [] - because the change_event resource's schema
-  (retention limit, granularity, available fields) has not been confirmed
-  via a live metadata_get_resource_metadata call (Google Ads MCP Connector
-  was unavailable every time this was attempted). This is a harder gate
-  than the rest of this script's "not yet live-verified" status: those
-  other parts (quadrant math, deltas, CSV/JSON shape) are built on
-  reasonable, testable assumptions and just need a live data run to
-  confirm; the correlation matching logic literally cannot be written
-  correctly without knowing change_event's fields first, so it's left as
-  a stub with the call site wired in, not a best-guess implementation.
-  what_was_done is populated only if the caller supplies --changes (a CSV
-  in whatever shape the eventual MCP pull produces); columns are read
-  generically (date/campaign/change_type/description, case-insensitive)
-  since the real schema isn't confirmed - update load_change_events() once
-  it is.
+Change-log schema (CLAUDE.md's Known technical notes has the full
+write-up; confirmed 2026-09-21 via metadata_get_resource_metadata + live
+pulls, in a parallel verification session, against this toolkit's actual
+account):
+  Resource: change_event. Fields: change_date_time, change_resource_type,
+  resource_change_operation, campaign, ad_group, changed_fields,
+  old_resource, new_resource, user_email, client_type, resource_name.
+  Sortable: change_date_time, change_resource_type,
+  resource_change_operation, user_email only (not resource_name - same
+  pagination gotcha as search_term_view, relevant once a live pull is
+  wired into /performance-report). Retention: retrospective, but hard-
+  capped to a rolling ~29-day window from *query time* - independent of
+  whatever --period-start/--period-end dates are passed. A change-log
+  pull is only possible when the analysis period overlaps roughly the
+  trailing month; older periods get {"status": "not_available"}, same as
+  omitting --changes entirely, not an error.
+  Granularity: campaign-scoped changes carry a non-empty "campaign"
+  field; ad-group/ad/keyword-scoped changes carry only "ad_group" (no
+  campaign field) - there's no dedicated keyword/criterion field, so a
+  specific keyword change is only identifiable via changed_fields/
+  old_resource/new_resource on an AD_GROUP_CRITERION-typed event.
+  build_correlation_flags() currently matches on the "campaign" field
+  only - ad-group-scoped changes pass through into what_was_done's raw
+  change list but are NOT correlated to any cluster/campaign, since this
+  script has no ad_group -> campaign mapping wired in (a different join
+  than the search-term scripts already do, for a different reason - see
+  CLAUDE.md). This is a real, documented gap, not an oversight - wire that
+  mapping in if ad-group-level correlation (ad copy edits, keyword-level
+  changes) turns out to matter in practice.
+  Still --changes CSV, not a live MCP pull: this script itself has no
+  Google Ads MCP access (it's a pure CSV-in, JSON-out script, same as
+  every other script in this toolkit) - /performance-report's job is to
+  pull change_event live (once wired in there) and hand this script a CSV
+  in load_change_events()'s expected shape.
 
 Quadrants (never a single composite score - see causal_note() below for a
 qualitative explanation layer that sits *alongside* this, not inside it):
@@ -202,10 +218,12 @@ def parse_args():
     parser.add_argument("--target-start", default=None, help="Trailing benchmark window start date, YYYY-MM-DD (required with --benchmark target)")
     parser.add_argument("--target-end", default=None, help="Trailing benchmark window end date, YYYY-MM-DD (required with --benchmark target)")
     parser.add_argument("--changes", default=None,
-                         help="Change-log CSV for the period (date/campaign/change_type/description columns, "
-                              "case-insensitive) - optional, populates what_was_done and enables correlation "
-                              "flags once change_event's real schema is confirmed (see module docstring's "
-                              "'Change-log gating'). Omit to leave what_was_done as not_available.")
+                         help="change_event CSV for the period (confirmed schema: change_date_time, "
+                              "change_resource_type, resource_change_operation, campaign, ad_group, "
+                              "changed_fields, old_resource, new_resource, user_email, client_type - see "
+                              "module docstring's 'Change-log schema') - optional, populates what_was_done "
+                              "and drives real correlation_flags matching for campaign-scoped changes. "
+                              "Omit to leave what_was_done as not_available.")
     parser.add_argument("--output", default=None, help="Structured-findings JSON path (default: <project>-campaign-performance.json)")
     args = parser.parse_args()
 
@@ -257,18 +275,26 @@ def load_metrics_csv(path, label):
 
 
 def load_change_events(path):
-    """Pass-through loader for a change-log CSV in an as-yet-unconfirmed
-    shape (see module docstring's "Change-log gating"). Reads a plain
-    header row directly (csv.DictReader) rather than common.load_table()'s
-    Google-Ads-UI-export header detection: that heuristic requires 2+ column
-    labels matching HEADER_HINTS (built for search-term/campaign exports),
-    which a change-log pull's own columns (date/change-type/description)
-    won't hit, and this toolkit's own MCP-pull CSVs are hand-built without
-    a UI export's preamble title row anyway - so there's nothing here for
-    that detection to earn its keep on. Column matching is deliberately
-    loose (case-insensitive, tolerates "change_type" or "change type") since
-    the real change_event field names aren't confirmed yet - update this
-    once metadata_get_resource_metadata confirms them.
+    """Loader for a change_event CSV in the confirmed schema (see module
+    docstring's "Change-log schema"): change_date_time,
+    change_resource_type, resource_change_operation, campaign, ad_group,
+    changed_fields, old_resource, new_resource, user_email, client_type,
+    resource_name. Reads a plain header row directly (csv.DictReader)
+    rather than common.load_table()'s Google-Ads-UI-export header
+    detection: that heuristic requires 2+ column labels matching
+    HEADER_HINTS (built for search-term/campaign exports), which a
+    change_event pull's own columns won't hit, and this toolkit's own
+    MCP-pull CSVs are hand-built without a UI export's preamble row anyway.
+    Column matching is case-insensitive and tolerates an underscore or
+    space variant, so both a raw API-field-named pull and a friendlier
+    hand-built CSV resolve the same way.
+
+    "description" is synthesized here (operation + resource type +
+    changed fields, e.g. "UPDATE CAMPAIGN_BUDGET - changed: amount_micros")
+    for what_was_done's factual list - built directly from the confirmed
+    fields, not a guess at what changed_fields' raw values mean, since
+    that's exactly the kind of interpretation the "no analysis, just
+    facts" rule (see module docstring, section 1) says to leave out.
 
     Returns None (not []) when --changes wasn't passed, so callers can tell
     "no changes happened" apart from "we didn't look".
@@ -287,19 +313,42 @@ def load_change_events(path):
                 return lower_map[candidate]
         return None
 
-    date_col = col("date")
+    date_col = col("change_date_time", "change date time", "date")
+    type_col = col("change_resource_type", "change resource type", "change type")
+    op_col = col("resource_change_operation", "resource change operation", "operation")
     campaign_col = col("campaign", "campaign name")
-    type_col = col("change_type", "change type", "resource", "resource type")
-    desc_col = col("description", "change", "change description")
-    return [
-        {
-            "date": (row.get(date_col) or "").strip() if date_col else "",
-            "campaign": (row.get(campaign_col) or "").strip() if campaign_col else "",
-            "change_type": (row.get(type_col) or "").strip() if type_col else "",
-            "description": (row.get(desc_col) or "").strip() if desc_col else "",
-        }
-        for row in rows
-    ]
+    ad_group_col = col("ad_group", "ad group")
+    changed_fields_col = col("changed_fields", "changed fields")
+    old_col = col("old_resource", "old resource")
+    new_col = col("new_resource", "new resource")
+    user_col = col("user_email", "user email")
+    client_col = col("client_type", "client type")
+
+    def get(row, c):
+        return (row.get(c) or "").strip() if c else ""
+
+    changes = []
+    for row in rows:
+        change_type = get(row, type_col)
+        operation = get(row, op_col)
+        changed_fields = get(row, changed_fields_col)
+        description = f"{operation} {change_type}".strip()
+        if changed_fields:
+            description += f" - changed: {changed_fields}"
+        changes.append({
+            "date": get(row, date_col),
+            "change_resource_type": change_type,
+            "operation": operation,
+            "campaign": get(row, campaign_col),
+            "ad_group": get(row, ad_group_col),
+            "changed_fields": changed_fields,
+            "old_resource": get(row, old_col),
+            "new_resource": get(row, new_col),
+            "user_email": get(row, user_col),
+            "client_type": get(row, client_col),
+            "description": description,
+        })
+    return changes
 
 
 def build_what_was_done(change_events):
@@ -307,31 +356,68 @@ def build_what_was_done(change_events):
         return {
             "status": "not_available",
             "reason": (
-                "Change-log resource investigation (change_event: retention limit, granularity, "
-                "available fields) has not been completed - the Google Ads MCP Connector was "
-                "unavailable every time this was attempted. Pass --changes once a pull is available, "
-                "or wire the fetch into /performance-report once the schema is confirmed - see "
-                "CLAUDE.md's Known technical notes / Planned section."
+                "No --changes CSV was passed. The change_event resource's schema is confirmed (see "
+                "CLAUDE.md's Known technical notes / this module's docstring), but this script has no "
+                "live Google Ads MCP access itself (it's CSV-in, JSON-out like every other script here) "
+                "- /performance-report pulls change_event live and passes it via --changes, when the "
+                "analysis period overlaps the resource's ~29-day rolling retention window."
             ),
             "changes": [],
         }
     return {"status": "available", "reason": None, "changes": change_events}
 
 
-def build_correlation_flags(entity_name, changes):
-    """Cross-reference one cluster/campaign's performance shift against
-    account changes logged during the period. Intentionally a stub - see
-    module docstring's "Change-log gating": the matching logic (which
-    changes plausibly affected which cluster/campaign, over what lag) can't
-    be written correctly without change_event's confirmed field names and
-    granularity, so this always returns [] rather than guessing. The call
-    site is wired into both the cohort and campaign loops in main() so
-    real logic can be dropped in here once the schema is confirmed, without
-    touching the rest of the pipeline.
+def changes_in_window(changes, window_start, window_end):
+    """Changes whose date falls within [window_start, window_end]
+    (inclusive) - anything outside that can't explain a shift between
+    these two specific periods, even though the change_event query itself
+    is scoped independently (a rolling ~29-day window from *query* time,
+    not from these period dates - see module docstring's "Change-log
+    schema"). A change whose date fails to parse is kept, not dropped, so
+    an unexpected date format surfaces as noise in what_was_done rather
+    than silently vanishing.
+    """
+    kept = []
+    for c in changes:
+        d = parse_iso_date(c.get("date", ""))
+        if d is None or window_start <= d <= window_end:
+            kept.append(c)
+    return kept
+
+
+def build_correlation_flags(campaign_names, changes):
+    """Cross-reference one cluster's (a list of its campaign names) or one
+    campaign's (a single name) performance shift against account changes
+    logged during the comparison-to-period window.
+
+    Matches only on a change's "campaign" field - campaign-scoped changes
+    (new/paused campaigns, budget changes, bid strategy/target changes)
+    are covered. Ad-group/ad/keyword-scoped changes (ad copy edits,
+    keyword adds) carry only an "ad_group" field with no "campaign" - see
+    module docstring's "Change-log schema" for why those are NOT matched
+    here (no ad_group -> campaign mapping is wired into this script) and
+    still appear in what_was_done's raw change list, just not correlated
+    to any cluster/campaign. This is a real, documented gap, not silently
+    dropped data.
+
+    `changes` is expected to already be filtered to the relevant window
+    (see changes_in_window() - called once in main(), not per entity).
     """
     if not changes:
         return []
-    return []
+    names = set(campaign_names) if isinstance(campaign_names, (list, set, tuple)) else {campaign_names}
+    return [
+        {
+            "date": c["date"],
+            "campaign": c["campaign"],
+            "change_resource_type": c["change_resource_type"],
+            "operation": c["operation"],
+            "changed_fields": c["changed_fields"],
+            "description": c["description"],
+        }
+        for c in changes
+        if c.get("campaign") in names
+    ]
 
 
 def build_cohorts(campaigns_by_name, clusters, exclude_from_scoring):
@@ -396,11 +482,22 @@ def conversion_rate(conversions, clicks):
 
 
 def parse_iso_date(raw):
+    """Parses a bare date ("2026-08-23") or a full datetime string
+    ("2026-08-23 14:12:39", or with a "T" separator) down to just the date
+    part. Confirmed live 2026-09-21 (in a parallel verification session)
+    that campaign.start_date_time comes back as a full datetime, not a
+    bare date - date.fromisoformat()'s strict parsing silently rejected
+    every real value before this fix, so every campaign fell into
+    campaign_age_status()'s "unknown" bucket regardless of its actual age.
+    Also used for change_event's change_date_time, which is the same
+    Google Ads API datetime shape.
+    """
     raw = (raw or "").strip()
     if not raw:
         return None
+    date_part = raw.split(" ")[0].split("T")[0]
     try:
-        return date.fromisoformat(raw)
+        return date.fromisoformat(date_part)
     except ValueError:
         return None
 
@@ -497,7 +594,7 @@ def classify_campaigns(period_campaigns, comparison_campaigns, clusters, exclude
                         min_conversions, benchmark_mode, cluster_targets, flat_target,
                         account_avg_conv_rate, period_end, new_campaign_window_days,
                         period_days, tcpa_min_conversions_per_30_days, tcpa_stability_pct,
-                        change_events):
+                        windowed_changes):
     rows = []
     for name, m in period_campaigns.items():
         cluster = common.match_cluster(name, clusters)
@@ -558,7 +655,7 @@ def classify_campaigns(period_campaigns, comparison_campaigns, clusters, exclude
             "conversion_rate": round(conv_rate * 100, 2) if conv_rate is not None else "",
             "conversion_rate_change_pct": round(conv_rate_delta, 1) if conv_rate_delta is not None else "",
             "conversions_value": round(m["conversions_value"], 2),
-            "correlation_flags": build_correlation_flags(name, change_events),
+            "correlation_flags": build_correlation_flags(name, windowed_changes),
         })
     return rows
 
@@ -670,6 +767,11 @@ def main():
     comparison_campaigns = load_metrics_csv(args.comparison, "comparison")
     change_events = load_change_events(args.changes)
     what_was_done = build_what_was_done(change_events)
+    # Only changes that could plausibly explain a shift between these two
+    # specific periods feed correlation_flags - see changes_in_window()'s
+    # docstring for why this is a separate window from the change_event
+    # query's own retention window.
+    windowed_changes = changes_in_window(what_was_done["changes"], args.comparison_start, args.period_end)
 
     period_cohorts = build_cohorts(period_campaigns, clusters, exclude_from_scoring)
     comparison_cohorts = build_cohorts(comparison_campaigns, clusters, exclude_from_scoring)
@@ -764,7 +866,7 @@ def main():
             "conversion_rate_change_pct": round(conv_rate_delta, 1) if conv_rate_delta is not None else "",
             "conversions_value": round(cohort["conversions_value"], 2),
             "campaign_count": len(cohort["campaigns"]),
-            "correlation_flags": build_correlation_flags(name, what_was_done["changes"]),
+            "correlation_flags": build_correlation_flags([m["campaign"] for m in cohort["campaigns"]], windowed_changes),
         })
 
     common.write_csv(cohort_csv_path, COHORT_CSV_FIELDS,
@@ -775,7 +877,7 @@ def main():
         min_conversions, args.benchmark, cluster_campaign_targets or {}, flat_campaign_target,
         account_avg_conv_rate, args.period_end, new_campaign_window_days,
         args.period_days, tcpa_min_conversions_per_30_days, tcpa_stability_pct,
-        what_was_done["changes"],
+        windowed_changes,
     )
     campaign_rows.sort(key=lambda r: -r["cost"])
     common.write_csv(campaign_csv_path, CAMPAIGN_CSV_FIELDS,
@@ -826,7 +928,7 @@ def main():
     print(f"  Period: {args.period_label}  vs  Comparison: {args.comparison_label}")
     print(f"  Benchmark: {args.benchmark} (target CAC={target_cac:.2f} target volume={target_volume:.1f})" if target_cac else f"  Benchmark: {args.benchmark} (no target - insufficient scored data)")
     print(f"  What was done: {what_was_done['status']}"
-          + ("" if what_was_done["status"] == "available" else " (change-log gate not cleared - see module docstring)"))
+          + ("" if what_was_done["status"] == "available" else " (no --changes passed)"))
     print(f"  Cohorts: {len(cohort_rows)} ({sum(1 for r in cohort_rows if r['status']=='scored')} scored, "
           f"{sum(1 for r in cohort_rows if r['status']=='insufficient_data')} insufficient data, "
           f"{sum(1 for r in cohort_rows if r['status']=='excluded')} excluded)")

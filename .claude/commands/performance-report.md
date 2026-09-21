@@ -23,7 +23,18 @@ Pipeline:
    never free text. Common phrasings and how to resolve them:
    - "compare September to August" → period = the full calendar month of
      September in the current/most recent relevant year, comparison = the
-     full calendar month of August immediately before it.
+     full calendar month of August immediately before it. **Exception: if
+     the named period is the current, still-in-progress calendar month**
+     (e.g. it's 2026-09-21 and the request says "September vs August"),
+     do NOT use the full month end (2026-09-30) as period-end - that
+     queries days that haven't happened yet. Use month-to-date instead
+     (period-start = the 1st, period-end = today), and cap the comparison
+     window to the *same number of days* from August's start (comparison-
+     start = August 1st, comparison-end = August 1st + (period-end -
+     period-start) days) rather than the full month of August - comparing
+     21 days of September against 31 days of August isn't a fair
+     before/after. Confirmed live 2026-09-21: this exact phrasing, asked
+     mid-September, would otherwise have queried future dates.
    - "this quarter vs the same quarter last year" → period = the current
      calendar quarter to date, comparison = the same quarter one year
      earlier (same start/end day-of-quarter, not just "12 months back" if
@@ -62,16 +73,36 @@ Pipeline:
    optionally target) — one row per campaign, with at least: Campaign,
    Cost, Conversions, Conv. value, Clicks, Impressions, Channel type,
    Campaign start date, Search lost IS (rank), Search lost IS (budget).
-4. **Change-log / "what was done"**: this is gated per CLAUDE.md's Known
-   technical notes ("Change-log gating") — the change_event resource's
-   schema (retention, granularity, available fields) has not been
-   confirmed via a live `metadata_get_resource_metadata` call. Attempt it
-   if the connector is available and it hasn't been confirmed yet
-   (report back what you find, the same way other gated investigations in
-   this project get confirmed once); if it's still unconfirmed or the
-   connector is unavailable, skip building a `--changes` CSV entirely and
-   let the report's "What was done" section stay `not_available` — don't
-   block the rest of the report on this.
+4. **Change-log / "what was done"**: the `change_event` resource's schema
+   is confirmed (see CLAUDE.md's Known technical notes / this script's
+   module docstring's "Change-log schema") - fields: `change_date_time`,
+   `change_resource_type`, `resource_change_operation`, `campaign`,
+   `ad_group`, `changed_fields`, `old_resource`, `new_resource`,
+   `user_email`, `client_type`, `resource_name`. **Retention is a hard,
+   rolling ~29-day window from query time** (not from the analysis
+   period's dates) - before attempting the pull, check whether
+   `--comparison-start` (the earlier edge of the two windows) falls within
+   roughly the last 29 days of *today*. If it doesn't, the pull isn't
+   possible - skip it and let "What was done" stay `not_available`, same
+   as if the connector were unavailable; don't treat this as an error.
+   When it's in range and the connector is available, pull `change_event`
+   for `change_date_time` between `--comparison-start` and `--period-end`,
+   filtered to `campaign`/`campaign_budget`/`ad_group`/`ad_group_criterion`
+   `change_resource_type`s (the ones "what was done" cares about - new/
+   paused campaigns, budget, bid strategy, ad group/keyword/ad changes).
+   Sortable fields are only `change_date_time`, `change_resource_type`,
+   `resource_change_operation`, `user_email` (not `resource_name`) - same
+   pagination pattern as `search_search` (cursor on the sort key, dedupe
+   by `resource_name` locally) if a pull needs more than one batch. Build
+   a CSV with those columns (header names matching the API field names is
+   fine - `load_change_events()` matches case-insensitively and tolerates
+   underscore/space variants) and pass it via `--changes`. Note the one
+   real limitation: correlation only works for campaign-scoped changes (a
+   non-empty `campaign` field); ad-group/ad/keyword-scoped changes (only
+   `ad_group` populated) still appear in "What was done" but aren't
+   auto-matched to a cluster/campaign - call those out yourself in prose
+   in step 6 if they're relevant (e.g. an ad copy edit in a cluster you're
+   already discussing).
 5. Run:
    `python3 analyze_campaign_performance.py --config configs/<project>.yaml --period <period CSV> --period-start <date> --period-end <date> --comparison <comparison CSV> --comparison-start <date> --comparison-end <date> [--benchmark cluster|account|target] [--target <target CSV> --target-start <date> --target-end <date>] [--changes <changes CSV>] --output <project>-campaign-performance.json`
    using `--benchmark cluster` (the script's default) unless the user's
@@ -84,27 +115,30 @@ Pipeline:
    - **What was done** — plain factual list of account changes in the
      period, straight from `what_was_done.changes` if
      `what_was_done.status == "available"`; if `not_available`, say so
-     plainly (change-log gate not cleared yet) rather than omitting the
-     section.
+     plainly (either no `--changes` pull was possible this run - most
+     often because the analysis period falls outside `change_event`'s
+     ~29-day retention window, see step 4 - or the connector was
+     unavailable) rather than omitting the section.
    - **What happened with performance** — start with
      `performance.account` (period vs. comparison: cost, conversions,
      CR%, CAC, traffic), then walk `performance.clusters` (each cluster's
      before/after the same way), then within each cluster give a short
      campaign-vs-campaign comparison using its nested `campaigns` list
      (e.g. "Campaign A: more conversions, higher CAC" vs. "Campaign B:
-     better CR%, fewer conversions"). Cross-reference `what_was_done`'s
-     changes (when available) against each cluster's performance shift
-     and call out a likely correlation where one plausibly exists -
-     including negative correlations (e.g. a campaign still in a learning
-     phase after a recent change, or a cut budget suppressing volume).
-     `correlation_flags` on each cluster/campaign is currently always
-     empty (the matching logic itself is gated, per CLAUDE.md - the field
-     is wired in for later, not populated yet), so do this
-     cross-referencing yourself, in prose, directly from the
-     `what_was_done.changes` list and the before/after deltas - don't
-     wait on `correlation_flags` to be non-empty. Cite each entity's
-     `lost_is_diagnostic` wherever it helps explain a shift (e.g. "capped
-     by budget" vs. "capped by rank/quality").
+     better CR%, fewer conversions"). Each cluster/campaign's
+     `correlation_flags` lists real, already-matched changes scoped to
+     that entity (campaign-scoped changes only, within the comparison-to-
+     period window) - lead with those where present, and call out a
+     likely correlation where one plausibly exists, including negative
+     correlations (e.g. a campaign still in a learning phase after a
+     recent change, or a cut budget suppressing volume). `correlation_flags`
+     does NOT cover ad-group/ad/keyword-scoped changes (see step 4) - if
+     `what_was_done.changes` has one relevant to a cluster you're
+     discussing (matched only by campaign name showing up in its
+     description, since there's no automatic link), call it out yourself
+     in prose the same way. Cite each entity's `lost_is_diagnostic`
+     wherever it helps explain a shift (e.g. "capped by budget" vs.
+     "capped by rank/quality").
    - **Next steps** — conclusions, built from `next_steps` (scale/cut/edit
      candidates, top-by-conversions, unused-potential headroom) at both
      the cluster and campaign level: top performers, room to scale, where
