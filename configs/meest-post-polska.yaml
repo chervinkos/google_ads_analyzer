@@ -8,6 +8,39 @@ primary_conversion_name: "Parcels"
 thresholds:
   min_clicks: 2
   min_cost: 20
+  # Period-proportional floor for analyze_campaign_performance.py's
+  # quadrant classification, expressed as a rate rather than a flat count -
+  # 10 Parcels conversions over a 2-week period is a fine, small-but-normal
+  # sample; the same 10 over 90 days is a persistently low rate, a real
+  # signal of a problem, not "not enough data yet". The script scales this
+  # to whatever custom period is selected: floor = round(this rate *
+  # period_days / 30), with a hard minimum of 3 (see
+  # MIN_QUADRANT_FLOOR_ABSOLUTE in analyze_campaign_performance.py) so a
+  # very short period still requires a few real data points. A campaign/
+  # cohort under the floor goes to "insufficient data", never dropped or
+  # force-classified.
+  min_conversions_per_30_days: 10
+  # How recently a campaign must have started (relative to the analysis
+  # period's end date) to be treated as "new" rather than "stagnant" when
+  # it lands in insufficient data - a new campaign below the floor has
+  # upside potential worth flagging differently from a long-running one
+  # that's simply stayed low-volume.
+  new_campaign_window_days: 30
+  # tCPA candidacy guidance for analyze_campaign_performance.py - these are
+  # adjustable assumptions, NOT hard rules from Google; actual stability
+  # requirements vary by account. min conversions/30 days is Google's own
+  # general guidance for stable Target CPA performance; the CAC-stability
+  # check is this toolkit's own proxy (period-over-comparison CAC swing),
+  # since a single two-period comparison can't measure true variance.
+  tcpa_min_conversions_per_30_days: 30
+  tcpa_cac_stability_pct: 30
+
+# Clusters to skip from campaign-performance quadrant scoring (they still
+# appear in raw per-campaign CSV output, just not classified/compared) -
+# branded campaigns reflect warm/returning-audience behavior, not
+# destination-market performance, so scoring them against destination
+# cohorts would be comparing apples to oranges.
+exclude_from_scoring: ["brand"]
 
 # Clusters are matched by campaign name, top to bottom, first match wins.
 # Patterns are regex (re.search, case-insensitive). Short geo-codes (ua, us,
@@ -56,6 +89,139 @@ clusters:
   - name: international
     match_campaign_name: "catch-all"   # anything not matched above
 
+# Content-based country/destination detection, run against the search
+# *term* text itself (not the campaign it currently lives in) - an
+# independent axis from clusters[] above. Feeds analyze_topic_alignment.py's
+# mismatch/re-home signal (a term whose content says one country but whose
+# campaign says another) and its demand-discovery signal (real query volume
+# for a country the account doesn't yet serve at all).
+#
+# `cluster` links a topic to its corresponding clusters[] entry, for the 4
+# "core" destinations already served by a dedicated cluster (US/UK/UA/DE).
+# Topics with no `cluster` field are "tracked": countries with real or
+# plausible demand but no dedicated campaign/cluster yet - classify_topic()
+# reports these as tracked_no_campaign rather than single, and the script's
+# re-home suggestion only ever points at a live ENABLED campaign, never at
+# a tracked topic.
+#
+# Same regex conventions as clusters (re.search, case-insensitive). Short
+# 2-letter country codes are deliberately NOT used as bare patterns here
+# (unlike clusters' campaign-name matching) - free-text search-term content
+# in Polish is full of short words/diacritics that a 2-letter code would
+# false-positive against (e.g. bare "us" inside "usługa" = "service"), so
+# every pattern below is a full country-name root or longer.
+#
+# Built 2026-09-16 as a first pass - most tracked entries below are 1-3
+# starter patterns (Polish + English only) and have NOT yet been checked
+# against real search-term data for false positives (a short root colliding
+# with an unrelated common word) or missing-language gaps (this account
+# also has real Ukrainian, Russian, and mixed-script query volume). That
+# verification is pending - do not treat this list as final. Two known
+# collision risks were designed around up front rather than left for
+# verification to catch:
+#   - Denmark: avoided a bare "dan"/"dani" root, since "dania" is also the
+#     plural of the common Polish word "danie" (a dish/course of food) -
+#     used "duń" (Duński/Dunczyk) instead, which isn't a real-word substring.
+#   - Czech Republic: avoided bare "czech", since it's a literal substring
+#     of "Niemczech" (locative case of "Niemcy" = Germany, e.g. "wysyłka do
+#     Niemczech") - used "czechy" (has no matching "y" in "Niemczech") and
+#     full "czech republic" instead.
+topic_keywords:
+  - name: PL-UA
+    cluster: PL-UA
+    match: ["ukrain", "україн", "украин"]
+
+  - name: PL-US
+    cluster: PL-US
+    match: ["usa", "stany zjednoczone", "united states"]
+
+  - name: PL-UK
+    cluster: PL-UK
+    match: ["wielka brytania", "united kingdom", "anglia", "angli"]
+
+  - name: PL-DE
+    cluster: PL-DE
+    match: ["niemc", "niemiec", "german"]
+
+  - name: PL-AT   # Austria
+    match: ["austri", "wiedeń", "wieden"]
+
+  - name: PL-BE   # Belgium
+    match: ["belgi"]
+
+  - name: PL-BG   # Bulgaria
+    match: ["bułgari", "bulgari"]
+
+  - name: PL-GR   # Greece
+    match: ["grecj", "greece"]
+
+  - name: PL-DK   # Denmark
+    match: ["duń", "denmark", "kopenhag"]
+
+  - name: PL-EE   # Estonia
+    match: ["estoni"]
+
+  - name: PL-IE   # Ireland
+    match: ["irlandi", "ireland"]
+
+  - name: PL-ES   # Spain
+    match: ["hiszpani", "spain"]
+
+  - name: PL-IT   # Italy
+    match: ["włoch", "wloch", "ital"]
+
+  - name: PL-LV   # Latvia
+    match: ["łotw", "lotw", "latvia"]
+
+  - name: PL-LT   # Lithuania
+    match: ["litw", "lithuania"]
+
+  - name: PL-LU   # Luxembourg
+    match: ["luksemburg", "luxembourg"]
+
+  - name: PL-PT   # Portugal
+    match: ["portugal"]
+
+  - name: PL-RO   # Romania
+    match: ["rumuni", "romania"]
+
+  - name: PL-SK   # Slovakia
+    match: ["słowacj", "slowacj", "slovakia"]
+
+  - name: PL-SI   # Slovenia
+    match: ["słoweni", "sloweni", "slovenia"]
+
+  - name: PL-HU   # Hungary
+    match: ["węgr", "wegr", "hungary"]
+
+  - name: PL-FI   # Finland
+    match: ["finlandi", "finland"]
+
+  - name: PL-FR   # France
+    match: ["francj", "france"]
+
+  - name: PL-HR   # Croatia
+    match: ["chorwacj", "croatia"]
+
+  - name: PL-CZ   # Czech Republic
+    # Plain "czechy" (nominative plural) is a safe bare substring, but the
+    # genitive "do Czech" (a plausible real query, like "do Niemiec" for
+    # Germany) needs a boundary-anchored "czech" instead of bare "czech" -
+    # bare "czech" is a literal substring of "Niemczech" (locative of
+    # Germany). Anchoring with (?<![A-Za-z]) blocks that: the "m" right
+    # before "czech" in "Niemczech" is a letter, so the lookbehind fails
+    # there, while "do Czech" (preceded by a space) still matches.
+    match: ["czechy", "(?<![A-Za-z])czech(?![A-Za-z])", "czech republic", "republika czeska"]
+
+  - name: PL-SE   # Sweden
+    match: ["szwecj", "sweden"]
+
+  - name: PL-CA   # Canada
+    match: ["kanad", "canada"]
+
+  - name: PL-NL   # Netherlands
+    match: ["holandi", "niderland", "netherlands"]
+
 # Used for search-term-level brand detection (content matching),
 # independent of which campaign the term currently lives in —
 # feeds the pattern-seeking / re-homing suggestion stage.
@@ -65,12 +231,3 @@ brand_keywords:
   - мист
   - mist
   - меест
-
-# Used for search-term-level intent/service detection — separate
-# axis from geographic clusters (a term can be, e.g., PL-UA *and*
-# business-shipping at the same time).
-intent_keywords:
-  - name: business-shipping
-    match: ["firmowa", "firmowe", "biznes", "hurtowa", "b2b"]
-  - name: document-shipping
-    match: ["dokument", "dokumenty", "listy", "koperta"]
