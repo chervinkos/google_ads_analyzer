@@ -116,16 +116,48 @@ clusters:
 # against real search-term data for false positives (a short root colliding
 # with an unrelated common word) or missing-language gaps (this account
 # also has real Ukrainian, Russian, and mixed-script query volume). That
-# verification is pending - do not treat this list as final. Two known
-# collision risks were designed around up front rather than left for
-# verification to catch:
-#   - Denmark: avoided a bare "dan"/"dani" root, since "dania" is also the
-#     plural of the common Polish word "danie" (a dish/course of food) -
-#     used "duń" (Duński/Dunczyk) instead, which isn't a real-word substring.
+# verification is still pending for most topics - do not treat this list
+# as final.
+#
+# PL-UA/US/UK/DE/IT/CZ/DK were updated 2026-09-21, porting live-verified
+# findings from a separate branch's independent real-data check (its
+# author ran a real search-term pull and manually reviewed the
+# unclassified/ambiguous output - see CLAUDE.md's Known technical notes
+# for specifics). Ported: Russian Cyrillic forms (this account has real
+# Russian-language volume alongside Polish/Ukrainian/English - "украин" for
+# Ukraine was already here, missing it cost ~150 real unclassified terms
+# in that check), richer Polish phrase patterns for US/UK, and a real
+# (not speculative) Denmark false-positive: bare "dani[ae]" without word
+# boundaries matches inside "nadanie"/"podanie"/"oddanie" (Polish
+# shipping-domain words for "dispatch/sending") - fixed with \b anchoring.
+# Two of that branch's patterns were deliberately NOT ported despite being
+# "live-verified" there: bare boundary-anchored "us" and "uk"
+# ((?<![A-Za-z])us(?![A-Za-z]) etc.) both still false-positive on real
+# Polish words with a diacritic letter immediately adjacent (confirmed:
+# "us" matches inside "usługa" = "service"; "uk" matches inside
+# "ukąszenie" = "a bite/sting") - [A-Za-z] doesn't cover Polish diacritics,
+# so the boundary check silently treats a diacritic as "not a letter" and
+# fails to block the match. Keep avoiding bare 2-letter codes in this
+# section entirely, per the original design note below.
+#
+# Two known collision risks were designed around up front, before the
+# 2026-09-21 pass above, rather than left for verification to catch:
+#   - Denmark: avoided a bare "dan"/"dani" root for the *standalone* word
+#     "dania"/"danie", since that's also the Polish word for "dish/course
+#     of food" (nominative "danie", genitive/plural "dania" - identical
+#     spelling to the country name in that form). The 2026-09-21 \b fix
+#     above only solves the *mid-word* collision (inside "nadanie" etc.);
+#     this standalone-word ambiguity is real, distinct, and still
+#     unresolved - "duń" (Duński/Dunczyk) remains in the pattern list
+#     specifically because it doesn't share this ambiguity. Flag any
+#     "dani[aei]"-matched row for a manual look before trusting it blindly
+#     until this gets its own real-data check.
 #   - Czech Republic: avoided bare "czech", since it's a literal substring
 #     of "Niemczech" (locative case of "Niemcy" = Germany, e.g. "wysyłka do
-#     Niemczech") - used "czechy" (has no matching "y" in "Niemczech") and
-#     full "czech republic" instead.
+#     Niemczech") - the 2026-09-21 pass replaced the original two-pattern
+#     fix with a single more-robust lookbehind (see PL-CZ below) that also
+#     excludes Polish diacritics, not just ASCII letters, immediately
+#     before "czech".
 topic_keywords:
   - name: PL-UA
     cluster: PL-UA
@@ -133,15 +165,26 @@ topic_keywords:
 
   - name: PL-US
     cluster: PL-US
-    match: ["usa", "stany zjednoczone", "united states"]
+    # "stan\w* zjednoczon" replaces the old bare "stany zjednoczone" phrase
+    # with a richer inflection match (stanów/stany zjednoczon-ych/-e), and
+    # "do stan\w*" catches the shorter real-query form "paczka do stanów"
+    # without "zjednoczonych" - phrase-anchored on purpose, since a bare
+    # "stan" root would also match "stan przesyłki" (shipment status), an
+    # unrelated but plausible real query in this domain. "сша" is the
+    # Russian Cyrillic acronym for USA.
+    match: ["stan\\w* zjednoczon", "do stan\\w*", "usa", "united states", "сша"]
 
   - name: PL-UK
     cluster: PL-UK
-    match: ["wielka brytania", "united kingdom", "anglia", "angli"]
+    # "wielk\w* brytani" replaces the old bare "wielka brytania" phrase
+    # with a richer inflection match (wielkiej brytanii/wielka brytania).
+    # "великобритан" is the Russian "Great Britain".
+    match: ["wielk\\w* brytani", "united kingdom", "anglia", "angli", "великобритан"]
 
   - name: PL-DE
     cluster: PL-DE
-    match: ["niemc", "niemiec", "german"]
+    # "герман" is the Russian "Germany".
+    match: ["niemc", "niemiec", "german", "герман"]
 
   - name: PL-AT   # Austria
     match: ["austri", "wiedeń", "wieden"]
@@ -156,7 +199,15 @@ topic_keywords:
     match: ["grecj", "greece"]
 
   - name: PL-DK   # Denmark
-    match: ["duń", "denmark", "kopenhag"]
+    # "\bdani[aei]\b" is the 2026-09-21-verified fix: word-boundary-anchored
+    # so it no longer matches inside "nadanie"/"podanie"/"oddanie" (Polish
+    # for "dispatch/sending" - a real false positive found live), while
+    # still catching "Dania"/"Danii"/"Danie" (all common Polish cases of
+    # the country name) as standalone words. It does NOT resolve the
+    # separate standalone-word ambiguity with "danie"/"dania" (a dish) -
+    # see the header comment above - so treat a match on this pattern
+    # alone as a hint worth a manual look, not a certainty.
+    match: ["duń", "denmark", "kopenhag", "\\bdani[aei]\\b"]
 
   - name: PL-EE   # Estonia
     match: ["estoni"]
@@ -168,7 +219,8 @@ topic_keywords:
     match: ["hiszpani", "spain"]
 
   - name: PL-IT   # Italy
-    match: ["włoch", "wloch", "ital"]
+    # "итали" is Russian, found live 2026-09-21.
+    match: ["włoch", "wloch", "ital", "итали"]
 
   - name: PL-LV   # Latvia
     match: ["łotw", "lotw", "latvia"]
@@ -204,14 +256,22 @@ topic_keywords:
     match: ["chorwacj", "croatia"]
 
   - name: PL-CZ   # Czech Republic
-    # Plain "czechy" (nominative plural) is a safe bare substring, but the
-    # genitive "do Czech" (a plausible real query, like "do Niemiec" for
-    # Germany) needs a boundary-anchored "czech" instead of bare "czech" -
-    # bare "czech" is a literal substring of "Niemczech" (locative of
-    # Germany). Anchoring with (?<![A-Za-z]) blocks that: the "m" right
-    # before "czech" in "Niemczech" is a letter, so the lookbehind fails
-    # there, while "do Czech" (preceded by a space) still matches.
-    match: ["czechy", "(?<![A-Za-z])czech(?![A-Za-z])", "czech republic", "republika czeska"]
+    # 2026-09-21: replaced the original two-pattern fix ("czechy" bare +
+    # a boundary-anchored "czech") with a single more-robust pattern.
+    # (?<![a-ząćęłńóśźż])czech (case-insensitive, so this also covers the
+    # uppercase range) blocks the "Niemczech" collision (locative of
+    # "Niemcy" = Germany - the "m" right before "czech" there is a letter,
+    # so the lookbehind fails) while still matching both "Czechy"
+    # (nominative plural - nothing blocks the trailing "y") and "do Czech"
+    # (genitive - preceded by a space) with one pattern instead of two.
+    # Unlike the old (?<![A-Za-z]) version, this lookbehind's character
+    # class also excludes Polish diacritics, not just ASCII letters - the
+    # old version would have silently let a diacritic count as "not a
+    # letter" and risked a false match right after one (the same class of
+    # bug found independently elsewhere in this account's campaign-name
+    # patterns). "czesk" adds the adjective forms (czeski/czeska/czeskie).
+    # "чехи"/"чех[иі]ю"/"чешск" are Russian, all found live.
+    match: ["(?<![a-ząćęłńóśźż])czech", "czesk", "czech republic", "republika czeska", "чехи", "чех[иі]ю", "чешск"]
 
   - name: PL-SE   # Sweden
     match: ["szwecj", "sweden"]

@@ -164,6 +164,21 @@ Each project/account has its own config file under `configs/`
   PAUSED or REMOVED campaign is never a valid reassignment target, only a
   cheaper-to-reactivate signal, so campaign status must always be pulled
   fresh via MCP (never cached) before running this analysis
+- PL-UA/US/UK/DE/IT/CZ/DK's `topic_keywords` patterns (Russian Cyrillic
+  forms, richer US/UK phrasing, the Denmark/Czech false-positive fixes -
+  see the detailed comments in `configs/meest-post-polska.yaml`) were
+  ported 2026-09-21 from a separate branch's independently live-verified
+  findings, not re-verified against this account's real data directly in
+  that session (the Google Ads MCP Connector wasn't available). Confirmed
+  by regex-level testing only (each pattern checked directly against its
+  claimed collision/target strings, including confirming why two of the
+  source branch's patterns - bare boundary-anchored "us"/"uk" - were
+  deliberately NOT ported: both still false-positive on real Polish words
+  with a diacritic immediately adjacent, e.g. "us" inside "usługa"). Run
+  a real search-term pull through `analyze_topic_alignment.py` and check
+  its unclassified/ambiguous output before treating these as fully
+  verified on this account, the same way the original topic_keywords
+  patterns were checked
 - `analyze_campaign_performance.py`'s quadrant-eligibility floor
   (`thresholds.min_conversions_per_30_days` in config) is **proportional
   to the selected period, not a flat count** — 10 Parcels conversions over
