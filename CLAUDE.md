@@ -42,7 +42,10 @@ Each project/account has its own config file under `configs/`
 - For narrative-style reports: state period vs. comparison period
   explicitly, and structure output as: what changed → observed/
   expected impact → what's working → recommended next steps
-  (scale / cut / edit / launch)
+  (scale / cut / edit / launch). Exception: `analyze_campaign_performance.py`
+  (v2) uses its own 3-section structure instead — What was done / What
+  happened with performance / Next steps — see the Scripts entry below and
+  its module docstring
 
 ## Known technical notes (Google Ads data handling)
 - Always filter by `metrics.impressions > 0` at the query level (not
@@ -260,6 +263,47 @@ Each project/account has its own config file under `configs/`
   surfaced across this project, and its distinction from `new_demand`
   was never clear. The remaining three signals (`new_demand`,
   `underexploited`, `rising_trend`) are considered sufficient
+- **`analyze_campaign_performance.py` v2 architecture (2026-09-21)**: the
+  script no longer renders a markdown narrative itself - it emits one
+  structured JSON file (`what_was_done` / `performance` / `next_steps`,
+  mirroring the report's 3-section structure) plus the same
+  `-cohorts.csv`/`-campaigns.csv` backups as before. The deterministic,
+  reproducible math (quadrant classification, before/after deltas,
+  account/cohort/campaign rollups) stays in Python; the narrative prose
+  itself is composed by Claude Code reading that JSON during the
+  `/performance-report` session, not generated inside the script via an
+  embedded LLM call. `performance.account` is a new addition (v1 only had
+  cohort/campaign levels) and is always a true account total, including
+  `exclude_from_scoring` clusters - unlike the scored cohort/campaign peer
+  groups, which exclude them. NOT YET LIVE-VERIFIED: exercised only
+  against hand-built synthetic CSVs (all three benchmark modes, the
+  `--changes` path, single-campaign-cohort fallback) - joins the existing
+  backlog of regex/logic-verified-only items (term_status, the ported
+  topic_keywords patterns) - run it against a real MCP pull and sanity-
+  check the JSON before treating it as confirmed.
+- **Change-log gating (`analyze_campaign_performance.py`'s "What was
+  done" section and `correlation_flags`)**: gated on confirming the
+  Google Ads change-log resource (expected to be `change_event`) via
+  `metadata_get_resource_metadata` - retention limit, granularity, and
+  available fields are all unconfirmed as of 2026-09-21 (the Google Ads
+  MCP Connector was unavailable every time this was attempted this
+  session). This is a harder gate than most "not yet live-verified"
+  items in this file: the rest of v2 is built on reasonable, testable
+  assumptions and just needs a live run to confirm, but the
+  correlation-matching logic in `build_correlation_flags()` literally
+  cannot be written correctly without knowing `change_event`'s fields
+  first, so it's left as a stub (always returns `[]`) with the call site
+  wired into both the cohort and campaign loops, not a best-guess
+  implementation. `what_was_done` stays `{"status": "not_available"}`
+  unless the caller passes `--changes <csv>` (see
+  `load_change_events()` - reads a plain header row directly rather than
+  `ads_common.load_table()`'s Google-Ads-UI-export header detection,
+  since a change-log pull isn't that kind of export and its real column
+  names aren't confirmed yet). Once the resource is confirmed: (1) wire
+  the actual MCP pull into `/performance-report`'s step 4, (2) implement
+  real matching in `build_correlation_flags()`, (3) update
+  `load_change_events()`'s column-guessing if the real field names don't
+  match its current date/campaign/change_type/description guesses.
 
 ## Scripts
 - `analyze_wasted_spend.py` — search-term waste analysis
@@ -274,15 +318,22 @@ Each project/account has its own config file under `configs/`
   suggestion (Added/Excluded-aware, see Known technical notes), and
   surfaces real demand for tracked countries with no dedicated campaign yet
   (`--config configs/<project>.yaml --input file.csv --campaigns file.csv [--output file.csv]`)
-- `analyze_campaign_performance.py` — campaign performance narrative report
-  (v1, Ads-only): cohort (destination cluster) and nested campaign-level
-  CAC × volume quadrant classification against a switchable benchmark
-  (cluster/account/target), a period-proportional insufficient-data floor
-  that splits low-volume campaigns into new/stagnant/unknown-age, a
-  causal-note layer (conversion rate vs. account average + Lost IS)
-  explaining *why* alongside each quadrant label, and a per-campaign tCPA
-  candidacy recommendation - output as a markdown narrative + CSV backups
-  (`--config configs/<project>.yaml --period file.csv --period-start YYYY-MM-DD --period-end YYYY-MM-DD --comparison file.csv --comparison-start YYYY-MM-DD --comparison-end YYYY-MM-DD [--benchmark cluster|account|target] [--target file.csv --target-start YYYY-MM-DD --target-end YYYY-MM-DD] [--output file.md]`)
+- `analyze_campaign_performance.py` — campaign performance report (v2,
+  Ads-only, structured-findings architecture - see Known technical notes):
+  account-level, cohort (destination cluster), and nested campaign-level
+  before/after rollups; CAC × volume quadrant classification against a
+  switchable benchmark (cluster/account/target); a period-proportional
+  insufficient-data floor that splits low-volume campaigns into
+  new/stagnant/unknown-age; a causal-note layer (conversion rate vs.
+  account average + Lost IS) explaining *why* alongside each quadrant
+  label; a per-campaign tCPA candidacy recommendation; and scale/cut/edit/
+  top-by-metric next-step rankings. Emits one structured JSON file (no
+  markdown narrative - that's composed by Claude Code from the JSON, see
+  `/performance-report`) plus `-cohorts.csv`/`-campaigns.csv` backups. An
+  optional `--changes` CSV populates the "what was done" section and
+  enables `correlation_flags`, both otherwise gated - see Known technical
+  notes' "Change-log gating"
+  (`--config configs/<project>.yaml --period file.csv --period-start YYYY-MM-DD --period-end YYYY-MM-DD --comparison file.csv --comparison-start YYYY-MM-DD --comparison-end YYYY-MM-DD [--benchmark cluster|account|target] [--target file.csv --target-start YYYY-MM-DD --target-end YYYY-MM-DD] [--changes file.csv] [--output file.json]`)
 - `ads_common.py` — shared helpers (header-row detection, numeric
   cleanup, cluster/brand/intent/topic/quadrant matching) used by the
   scripts above
@@ -294,3 +345,43 @@ Each project/account has its own config file under `configs/`
 - `/find-opportunities` — runs the full opportunity-discovery pipeline
   end-to-end using the active config's defaults, with inline overrides
   supported
+- `/performance-report` — runs the full campaign performance report
+  pipeline end-to-end and composes the narrative from the script's
+  structured JSON output. Takes the period to analyze and what to
+  compare it against in **plain language** (e.g. "compare September to
+  August", "this quarter vs the same quarter last year"), not raw
+  `--period-start`/`--period-end` flags - the command parses that into
+  real dates itself before invoking the script (see its own file for the
+  exact resolution rules and defaults). See Planned section below re: a
+  shared natural-language-to-dates helper across commands.
+
+## Planned / known gaps
+Deliberately deferred work, tracked here so it isn't lost or silently
+reattempted from scratch:
+
+- **Natural-language period parsing, currently per-command**:
+  `/performance-report` parses phrases like "September vs August" into
+  date-flag arguments itself, ad hoc, in its own command file. This same
+  pattern would benefit `/analyze-waste` and `/find-opportunities` too
+  (both currently take a window only via inline override text in the
+  request, parsed less formally). Not yet extracted into a shared
+  helper/convention - flagged 2026-09-21, not built. If a third command
+  needs the same parsing, extract it then rather than duplicating a third
+  time.
+- **`/performance-report`'s "Next steps" section should eventually
+  reference `/find-opportunities` signals** (new_demand, underexploited,
+  rising_trend) — e.g. a cluster flagged for scaling that also has
+  underexploited search-term headroom is a stronger signal than either
+  alone. Deferred until `/find-opportunities`' output is trusted enough
+  (its own signals are themselves partly gated on unverified term_status
+  - see Known technical notes) to build on with confidence.
+- **GA4 ecommerce item-level data cross-reference**: cross-referencing
+  GA4 ecommerce items (tagged by direction — PL-UA, PL-UK, PL-PL, etc.)
+  against search-demand potential, to strengthen `/performance-report`'s
+  scaling conclusions with actual revenue/margin signal instead of Ads-
+  only conversion count. Not started - no GA4 MCP access confirmed yet,
+  no schema investigation done.
+- **Change-log resource (`change_event`) investigation**: see Known
+  technical notes' "Change-log gating" - blocks `/performance-report`'s
+  "What was done" section and `correlation_flags` specifically, not the
+  rest of the toolkit.
