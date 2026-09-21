@@ -245,12 +245,24 @@ Each project/account has its own config file under `configs/`
   The PMax path does **not** have `campaign_search_term_view.status` (that
   field does not exist on the resource per `metadata_get_resource_metadata`)
   - its equivalent is `segments.search_term_targeting_status`, confirmed
-  live with the same three values. `ads_common.py`'s `COLUMN_CANDIDATES`
-  now includes a "search term targeting status" alias for `term_status` so
-  a PMax-sourced CSV resolves correctly (this was a real gap, confirmed by
-  testing `resolve_columns()` against that literal header text before the
-  fix - it silently failed to resolve, degrading to "none" for every PMax
-  row). Ran a real 30-day search-term pull through both
+  live with the same three commonly-seen values (ADDED/EXCLUDED/NONE).
+  Semantic equivalence (not just matching label strings) was then confirmed
+  2026-09-21 against Google's own API reference: both `search_term_view.status`
+  and `segments.search_term_targeting_status` are typed as the exact same
+  enum, `SearchTermTargetingStatusEnum.SearchTermTargetingStatus`, with the
+  identical description ("whether the search term is currently one of your
+  targeted or excluded keywords") on both fields - not a coincidental label
+  match, the same enum by design. Full value set (both paths, per Google's
+  reference): `ADDED`, `EXCLUDED`, `ADDED_EXCLUDED`, `NONE`, plus the
+  protocol meta-values `UNKNOWN`/`UNSPECIFIED` (return-only/request-only,
+  not real data). `ads_common.normalize_term_status()` already handled
+  `ADDED_EXCLUDED` correctly (substring-matches both "add" and "exclud")
+  before this was confirmed - no code change needed there. `ads_common.py`'s
+  `COLUMN_CANDIDATES` now includes a "search term targeting status" alias
+  for `term_status` so a PMax-sourced CSV resolves correctly (this was a
+  real gap, confirmed by testing `resolve_columns()` against that literal
+  header text before the fix - it silently failed to resolve, degrading to
+  "none" for every PMax row). Ran a real 30-day search-term pull through both
   `analyze_topic_alignment.py` and `analyze_search_opportunities.py`:
   `term_status` flows through with real values in both output CSVs (not
   blank), "already excluded here" and "already present as a keyword in"
