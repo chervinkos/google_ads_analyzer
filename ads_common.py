@@ -45,13 +45,15 @@ COLUMN_CANDIDATES = {
     "lost_is_rank": ["search lost is (rank)", "search rank lost impression share", "lost is (rank)"],
     "lost_is_budget": ["search lost is (budget)", "search budget lost impression share", "lost is (budget)"],
     "start_date": ["campaign start date", "start date"],
-    # NOT yet live-verified as available via the Google Ads MCP connector
-    # (search_term_view.status / campaign_search_term_view - see CLAUDE.md's
-    # Known technical notes) - a distinct logical field from "status"
-    # (campaign ENABLED/PAUSED/REMOVED) on purpose, so resolving one never
-    # collides with the other even though "status" is included here as a
-    # plausible raw header text too.
-    "term_status": ["added/excluded", "search term status", "keyword status", "status"],
+    # Live-verified 2026-09-21 (see CLAUDE.md's Known technical notes):
+    # search_term_view.status is the Search-path field; the PMax path has
+    # no campaign_search_term_view.status (that field doesn't exist) - its
+    # equivalent is segments.search_term_targeting_status, hence the
+    # "search term targeting status" alias below. A distinct logical field
+    # from "status" (campaign ENABLED/PAUSED/REMOVED) on purpose, so
+    # resolving one never collides with the other even though "status" is
+    # included here as a plausible raw header text too.
+    "term_status": ["added/excluded", "search term status", "search term targeting status", "keyword status", "status"],
 }
 
 
