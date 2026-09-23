@@ -27,16 +27,32 @@ Pipeline:
    Search-campaign rows if merged in unfiltered) and still needs merging
    in here too, for both the trailing and baseline pulls. Until then,
    opportunity signals from PMax traffic are missing; flag this in the
-   summary rather than silently omitting it.
+   summary rather than silently omitting it. When this merge is built,
+   also pull `segments.search_term_targeting_status` alongside it — the
+   PMax path's confirmed Added/Excluded equivalent (see step 3 below and
+   CLAUDE.md's "Known technical notes"; `campaign_search_term_view.status`
+   does not exist as a field, don't reach for it).
 2. Map ad groups to their campaign names for both search-term pulls
    (fetch any ad groups missing from the initial batch pull).
 3. Build three CSVs from the pulled data: trailing search terms, baseline
    search terms (each with Search term, Campaign, Ad group, Clicks, Cost,
    Conversions), and the active keyword list (with a Keyword column).
-   Also include the term's Added/Excluded status if the pull supports it —
-   NOT yet confirmed available (see CLAUDE.md's "Known technical notes");
-   check via `metadata_get_resource_metadata` on `search_term_view` before
-   assuming it's there, and proceed without it (as today) if it isn't.
+   Also include the term's Added/Excluded status, confirmed available on
+   both paths (see CLAUDE.md's "Known technical notes"): pull
+   `search_term_view.status` for Search rows and (once the PMax merge
+   above is built) `segments.search_term_targeting_status` for PMax rows
+   — same underlying enum, both map to `term_status` via
+   `ads_common.normalize_term_status()`. Give the column a header
+   `resolve_columns()` recognizes (e.g. "Search term status" for Search
+   rows, "Search term targeting status" for PMax rows — see
+   `ads_common.COLUMN_CANDIDATES`'s `term_status` entry) so it resolves
+   the same way regardless of which path a row came from. Two things to
+   keep in mind when eyeballing results (see CLAUDE.md for the full
+   writeup): a PMax row normalizing to "added" or "added_excluded" would
+   be unexpected (PMax has no keywords) and worth a second look, and
+   never sum `term_status` counts across the two paths as if they were
+   the same unit — they aggregate at different levels (ad group vs.
+   campaign), so only compare per-row.
 4. Run:
    `python3 analyze_search_opportunities.py --config configs/<project>.yaml --trailing <trailing CSV> --baseline <baseline CSV> --keywords <keyword-list CSV>`
    using script defaults, unless the user's request specifies different

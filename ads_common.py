@@ -252,12 +252,25 @@ def normalize_term_status(raw):
     """Normalize a raw Added/Excluded cell into one of "added", "excluded",
     "added_excluded", "none".
 
+    Shared across both paths on purpose: search_term_view.status (Search)
+    and segments.search_term_targeting_status (PMax) are the exact same
+    Google Ads API enum (SearchTermTargetingStatusEnum.SearchTermTargetingStatus,
+    confirmed via Google's own reference - see CLAUDE.md's Known technical
+    notes), so this function needs no path-awareness to handle both.
+
+    Two caveats worth knowing when reading normalized output, not this
+    function's problem to solve (see CLAUDE.md for the full writeup):
+    on the PMax path, "added"/"added_excluded" should be treated as
+    "can't occur" in practice (PMax has no keywords) - seeing one there
+    is worth a second look, not routine; and "excluded" counts are never
+    comparable as totals between the two paths, since the underlying
+    resources aggregate at different levels (ad group vs. campaign) -
+    only compare term_status per-row, never as a summed count.
+
     Tolerant of exact wording (substring match on "add"/"exclud") rather
-    than an exact-value lookup, since the real export format hasn't been
-    live-verified yet (see CLAUDE.md's Known technical notes) - this is
-    deliberately permissive so whatever the actual column text turns out
-    to be, common variants ("Added", "Excluded", "Added/Excluded") all
-    resolve correctly without needing a code change once verified.
+    than an exact-value lookup - deliberately permissive so any real
+    variant ("Added", "Excluded", "Added/Excluded") resolves correctly
+    without needing a code change.
     """
     text = (raw or "").strip().lower()
     if not text or text == PLACEHOLDER:

@@ -14,9 +14,12 @@ independent signal types:
 A term can carry multiple signals at once; all are reported together with
 a suggested action.
 
-Added/Excluded status (term_status - NOT yet live-verified as available
-via the Google Ads MCP connector, see CLAUDE.md's Known technical notes)
-is handled differently per signal, not as a blanket filter:
+Added/Excluded status (term_status - live-verified 2026-09-21 on the
+Search path (search_term_view.status) and confirmed as the same enum on
+the PMax path (segments.search_term_targeting_status), see CLAUDE.md's
+Known technical notes; a fresh live re-check of both paths together is
+still pending) is handled differently per signal, not as a blanket
+filter:
   - underexploited genuinely requires it - a term already Added as a
     keyword (in any campaign it appears in) isn't underexploited by
     definition, so it's excluded from this signal entirely.
@@ -24,9 +27,9 @@ is handled differently per signal, not as a blanket filter:
     trend term that's currently Excluded is a "reconsider this decision"
     signal worth surfacing, not noise to hide. term_status is included
     as a context column for these instead.
-Until the column is confirmed available and wired into the input CSVs,
-every row's term_status is "none" and this logic is inert (matches prior
-behavior exactly).
+If the input CSV doesn't have a resolvable term_status column at all,
+every row's term_status is "none" and this logic is inert - the column
+is optional input, not a hard requirement.
 
 Usage:
     analyze_search_opportunities.py --config configs/<project>.yaml \\

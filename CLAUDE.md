@@ -255,7 +255,39 @@ Each project/account has its own config file under `configs/`
   match, the same enum by design. Full value set (both paths, per Google's
   reference): `ADDED`, `EXCLUDED`, `ADDED_EXCLUDED`, `NONE`, plus the
   protocol meta-values `UNKNOWN`/`UNSPECIFIED` (return-only/request-only,
-  not real data). `ads_common.normalize_term_status()` already handled
+  not real data). Two practical caveats confirmed 2026-09-23, both
+  documented rather than assumed:
+    - **On the PMax path, `ADDED` and `ADDED_EXCLUDED` should be treated
+      as "can't occur"** - Performance Max has no keywords, so nothing on
+      that path can be directly marked as Added; only `EXCLUDED` and
+      `NONE` are practically meaningful there. `normalize_term_status()`
+      still recognizes all four values on both paths (it has no path-
+      awareness and shouldn't need any - the enum is genuinely shared),
+      but a PMax row normalizing to "added"/"added_excluded" would be
+      unexpected and worth a second look, not routine.
+    - **`EXCLUDED` counts are not comparable as totals between the Search
+      and PMax paths** - the two resources aggregate at different levels
+      (`search_term_view` at ad group, `campaign_search_term_view`/
+      `segments.search_term_targeting_status` at campaign), so summing
+      "N excluded terms" on one path and comparing it to the other's sum
+      compares different units, not the same fact measured twice.
+      `term_status` should only be compared or reasoned about per-row,
+      never as a summed count across paths.
+    - `ADDED_EXCLUDED` and `UNKNOWN` were never observed on either path in
+      a live 90-day window (only `ADDED`/`EXCLUDED`/`NONE` showed up in
+      practice) - noted as an open edge case this account's data hasn't
+      exercised, not as evidence the code handles it correctly. Re-check
+      if either value turns up in a future pull, rather than assuming
+      today's untested handling is right.
+  **Status: code wired, not yet re-verified together.** These two
+  caveats and the `segments.search_term_targeting_status` PMax pull
+  wiring (see the Scripts/slash-command entries) were added 2026-09-23
+  without a live MCP session (none was available); the underlying enum
+  equivalence itself was already live-confirmed 2026-09-21 (above), but
+  a fresh session with live access still needs to re-run `term_status`
+  checks across both Search and PMax paths *together*, with this wiring
+  and these caveats in place, before this item is fully closed.
+  `ads_common.normalize_term_status()` already handled
   `ADDED_EXCLUDED` correctly (substring-matches both "add" and "exclud")
   before this was confirmed - no code change needed there. `ads_common.py`'s
   `COLUMN_CANDIDATES` now includes a "search term targeting status" alias
