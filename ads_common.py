@@ -262,10 +262,11 @@ def normalize_term_status(raw):
     function's problem to solve (see CLAUDE.md for the full writeup):
     on the PMax path, "added"/"added_excluded" should be treated as
     "can't occur" in practice (PMax has no keywords) - seeing one there
-    is worth a second look, not routine; and "excluded" counts are never
-    comparable as totals between the two paths, since the underlying
-    resources aggregate at different levels (ad group vs. campaign) -
-    only compare term_status per-row, never as a summed count.
+    is worth a second look, not routine. And never sum "excluded" counts
+    across the two paths as if they were the same unit - search_term_view
+    aggregates at ad group level, campaign_search_term_view/
+    segments.search_term_targeting_status at campaign level, so only
+    compare term_status per-row, never as a cross-path total.
 
     Tolerant of exact wording (substring match on "add"/"exclud") rather
     than an exact-value lookup - deliberately permissive so any real

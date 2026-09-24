@@ -255,8 +255,8 @@ Each project/account has its own config file under `configs/`
   match, the same enum by design. Full value set (both paths, per Google's
   reference): `ADDED`, `EXCLUDED`, `ADDED_EXCLUDED`, `NONE`, plus the
   protocol meta-values `UNKNOWN`/`UNSPECIFIED` (return-only/request-only,
-  not real data). Two practical caveats confirmed 2026-09-23, both
-  documented rather than assumed:
+  not real data). Practical caveats confirmed 2026-09-23, documented
+  rather than assumed:
     - **On the PMax path, `ADDED` and `ADDED_EXCLUDED` should be treated
       as "can't occur"** - Performance Max has no keywords, so nothing on
       that path can be directly marked as Added; only `EXCLUDED` and
@@ -265,20 +265,19 @@ Each project/account has its own config file under `configs/`
       awareness and shouldn't need any - the enum is genuinely shared),
       but a PMax row normalizing to "added"/"added_excluded" would be
       unexpected and worth a second look, not routine.
-    - **`EXCLUDED` counts are not comparable as totals between the Search
-      and PMax paths** - the two resources aggregate at different levels
-      (`search_term_view` at ad group, `campaign_search_term_view`/
-      `segments.search_term_targeting_status` at campaign), so summing
-      "N excluded terms" on one path and comparing it to the other's sum
-      compares different units, not the same fact measured twice.
-      `term_status` should only be compared or reasoned about per-row,
-      never as a summed count across paths.
-    - `ADDED_EXCLUDED` and `UNKNOWN` were never observed on either path in
-      a live 90-day window (only `ADDED`/`EXCLUDED`/`NONE` showed up in
-      practice) - noted as an open edge case this account's data hasn't
-      exercised, not as evidence the code handles it correctly. Re-check
-      if either value turns up in a future pull, rather than assuming
-      today's untested handling is right.
+    - **`UNKNOWN` throws a query error on both paths, identically** -
+      it's a return-only protocol meta-value, not a real status a term
+      can hold, so filtering `search_term_view.status = 'UNKNOWN'` errors
+      out rather than returning zero rows, and the same is true of
+      `segments.search_term_targeting_status = 'UNKNOWN'` on the PMax
+      path - this is not a PMax-specific quirk, both fields reject it the
+      same way. Never build a query that filters either path on `UNKNOWN`.
+    - `ADDED_EXCLUDED` was never observed on either path in a live 90-day
+      window (only `ADDED`/`EXCLUDED`/`NONE` showed up in practice) -
+      noted as an open edge case this account's data hasn't exercised,
+      not as evidence the code handles it correctly. Re-check if it turns
+      up in a future pull, rather than assuming today's untested handling
+      is right.
   **Status: code wired, not yet re-verified together.** These two
   caveats and the `segments.search_term_targeting_status` PMax pull
   wiring (see the Scripts/slash-command entries) were added 2026-09-23
@@ -296,8 +295,10 @@ Each project/account has its own config file under `configs/`
   header text before the fix - it silently failed to resolve, degrading to
   "none" for every PMax row). Ran a real 30-day search-term pull through both
   `analyze_topic_alignment.py` and `analyze_search_opportunities.py`:
-  `term_status` flows through with real values in both output CSVs (not
-  blank), "already excluded here" and "already present as a keyword in"
+  `term_status` flowed through with real values in `analyze_topic_alignment.py`'s
+  output (not blank; `analyze_search_opportunities.py`'s output column was
+  later redesigned to `in_account`, a plain boolean - see that script's
+  entry below), "already excluded here" and "already present as a keyword in"
   both fire correctly on real Excluded/Added rows, `underexploited`
   correctly excludes every Added-anywhere term (verified against a real
   high-conversion Added term that would otherwise obviously qualify), and
@@ -321,9 +322,16 @@ Each project/account has its own config file under `configs/`
       `underexploited` only (a term already Added, in ANY campaign it
       appears in, isn't underexploited by definition - excluded from
       that signal entirely). Never filters `new_demand` or
-      `rising_trend` - a rising-trend term that's currently Excluded is
-      a "reconsider this decision" signal worth surfacing, not noise to
-      hide, so it's included as a context column there instead.
+      `rising_trend`. Its output column is `in_account` - a plain
+      boolean (True if Added or Added/Excluded in any campaign the term
+      appears in), not a representative term_status string. A status
+      picked from whichever campaign occurrence had the highest cost was
+      ambiguous - it could show "excluded" for a term that's actually
+      Added in a lower-cost campaign, or vice versa - and didn't
+      necessarily match what the `underexploited` filter itself checks.
+      `in_account` mirrors that filter's own "added anywhere" logic
+      exactly, the same way Google Ads' own UI reports "already in
+      account" as a single boolean rather than a per-occurrence status.
 - `intent_pattern` (a signal in `analyze_search_opportunities.py`) and
   its supporting config section (`intent_keywords`) and helper
   (`ads_common.match_intents`) were removed 2026-09-20 - it never had a
@@ -393,4 +401,8 @@ Each project/account has its own config file under `configs/`
   using the active config's defaults, with inline overrides supported
 - `/find-opportunities` — runs the full opportunity-discovery pipeline
   end-to-end using the active config's defaults, with inline overrides
-  supported
+  supported. **Standalone and opt-in** — run only when explicitly asked
+  for by name or by a request specifically about new-demand/
+  underexploited/rising-trend signals. It is never part of a default or
+  combined analysis; a generic "run the analysis"/"give me a report"
+  request means `/analyze-waste` alone, not this command bundled in too

@@ -1,5 +1,12 @@
 Run the full search-term opportunity/pattern discovery pipeline end-to-end.
 
+**Standalone and opt-in.** Run this only when explicitly requested — by
+name, or by a request specifically about new-demand/underexploited/
+rising-trend signals. It is not part of any default or combined
+analysis: a general "run the analysis" or "give me a report" request
+means `/analyze-waste` alone, never this command bundled in on top,
+unless the user separately asks for opportunity discovery too.
+
 Config selection (per CLAUDE.md):
 - If exactly one file exists under `configs/`, use it automatically.
 - If multiple exist, ask the user which project to use, matching against
@@ -46,13 +53,10 @@ Pipeline:
    `resolve_columns()` recognizes (e.g. "Search term status" for Search
    rows, "Search term targeting status" for PMax rows — see
    `ads_common.COLUMN_CANDIDATES`'s `term_status` entry) so it resolves
-   the same way regardless of which path a row came from. Two things to
+   the same way regardless of which path a row came from. One thing to
    keep in mind when eyeballing results (see CLAUDE.md for the full
    writeup): a PMax row normalizing to "added" or "added_excluded" would
-   be unexpected (PMax has no keywords) and worth a second look, and
-   never sum `term_status` counts across the two paths as if they were
-   the same unit — they aggregate at different levels (ad group vs.
-   campaign), so only compare per-row.
+   be unexpected (PMax has no keywords) and worth a second look.
 4. Run:
    `python3 analyze_search_opportunities.py --config configs/<project>.yaml --trailing <trailing CSV> --baseline <baseline CSV> --keywords <keyword-list CSV>`
    using script defaults, unless the user's request specifies different
@@ -62,10 +66,12 @@ Pipeline:
    flagged term tagged by signal type — `new_demand`, `underexploited`,
    `rising_trend` (a term can carry more than one) — and a suggested
    action per row. Added/Excluded status genuinely filters
-   `underexploited` (a term already Added isn't underexploited by
-   definition) but is only a context column for `new_demand`/
-   `rising_trend` — a rising-trend term that's currently Excluded is a
-   "reconsider this decision" signal, not noise to hide.
+   `underexploited` only (a term already Added isn't underexploited by
+   definition); `new_demand`/`rising_trend` are never filtered by it. The
+   output's `in_account` column is a plain boolean — True if the term is
+   Added anywhere across any campaign it appears in, matching exactly
+   what the `underexploited` filter itself checks — rather than a
+   per-campaign status string.
 6. Present the output to the user with a summary grouped by signal type:
    counts per signal, and 3-5 standout terms per signal worth a manual
    look. Structure the narrative as: what changed → observed/expected
