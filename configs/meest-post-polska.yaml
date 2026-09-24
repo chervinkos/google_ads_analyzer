@@ -179,12 +179,35 @@ topic_keywords:
     # "wielk\w* brytani" replaces the old bare "wielka brytania" phrase
     # with a richer inflection match (wielkiej brytanii/wielka brytania).
     # "великобритан" is the Russian "Great Britain".
-    match: ["wielk\\w* brytani", "united kingdom", "anglia", "angli", "великобритан"]
+    # "(?<![a-ząćęłńóśźż])uk(?![a-ząćęłńóśźż])" is the 2026-09-21-verified
+    # fix for a confirmed material false negative: this account's real
+    # search-term text uses plain "uk" heavily (121 unique unclassified
+    # terms, ~973 cost / 439 clicks over a 60-day pull, including two real
+    # mismatches - "dhl uk to poland" sitting in Search-Etsy, "paczki z uk
+    # do polski inpost" sitting in Search-Międzynarodowe - that stayed
+    # invisible to the mismatch signal with no PL-UK pattern to match
+    # against). A bare \b-boundary "uk" was deliberately left out
+    # originally because \b doesn't stop it matching inside a Polish word
+    # with a diacritic immediately adjacent (e.g. "usługa"/"ukąszenie" for
+    # "us"/"uk" - see the header comment above); this lookaround instead
+    # excludes the Polish diacritic range on both sides (same technique as
+    # PL-CZ's pattern below), confirmed live to reject "usługa"/"ukąszenie"
+    # while still matching "do uk"/"z uk"/"uk to poland" etc. "us" has the
+    # same theoretical collision risk but zero observed real-world gap in
+    # this account's query mix (Polish/English queries here consistently
+    # say "usa", not bare "us") - left as a documented candidate for the
+    # same fix if that changes, not applied speculatively.
+    match: ["wielk\\w* brytani", "united kingdom", "anglia", "angli", "великобритан",
+            "(?<![a-ząćęłńóśźż])uk(?![a-ząćęłńóśźż])"]
 
   - name: PL-DE
     cluster: PL-DE
-    # "герман" is the Russian "Germany".
-    match: ["niemc", "niemiec", "german", "герман"]
+    # "герман" is the Russian "Germany". "deutschland" (added 2026-09-21,
+    # minor real gap found live: "meest post deutschland" was unclassified
+    # since none of the other patterns catch the German-language spelling
+    # of the country's own name) covers German-language queries, which
+    # "german"/"niemc" alone don't.
+    match: ["niemc", "niemiec", "german", "герман", "deutschland"]
 
   - name: PL-AT   # Austria
     match: ["austri", "wiedeń", "wieden"]
@@ -220,7 +243,13 @@ topic_keywords:
 
   - name: PL-IT   # Italy
     # "итали" is Russian, found live 2026-09-21.
-    match: ["włoch", "wloch", "ital", "итали"]
+    # Bare "ital" (fixed 2026-09-21) false-positived on "digital" - confirmed
+    # live against this account's own Etsy campaigns ("digital products on
+    # etsy", "etsy ai digital products", etc., all wrongly tagged PL-IT).
+    # Also would have risked "capital"/"hospital"/"vital"/"recital".
+    # Lookbehind-anchored so it still matches "ital"/"italia"/"do italii"
+    # etc. but not mid-word after a letter.
+    match: ["włoch", "wloch", "(?<![A-Za-z])ital", "итали"]
 
   - name: PL-LV   # Latvia
     match: ["łotw", "lotw", "latvia"]

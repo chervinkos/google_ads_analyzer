@@ -14,19 +14,28 @@ independent signal types:
 A term can carry multiple signals at once; all are reported together with
 a suggested action.
 
-Added/Excluded status (term_status - NOT yet live-verified as available
-via the Google Ads MCP connector, see CLAUDE.md's Known technical notes)
-is handled differently per signal, not as a blanket filter:
-  - underexploited genuinely requires it - a term already Added as a
-    keyword (in any campaign it appears in) isn't underexploited by
-    definition, so it's excluded from this signal entirely.
-  - new_demand and rising_trend are never filtered by it - a rising-
-    trend term that's currently Excluded is a "reconsider this decision"
-    signal worth surfacing, not noise to hide. term_status is included
-    as a context column for these instead.
-Until the column is confirmed available and wired into the input CSVs,
-every row's term_status is "none" and this logic is inert (matches prior
-behavior exactly).
+Added/Excluded status (term_status - live-verified 2026-09-21 on the
+Search path (search_term_view.status) and confirmed as the same enum on
+the PMax path (segments.search_term_targeting_status), see CLAUDE.md's
+Known technical notes; a fresh live re-check of both paths together is
+still pending) genuinely filters underexploited only - a term already
+Added as a keyword (in ANY campaign it appears in) isn't underexploited
+by definition, so it's excluded from that signal entirely. new_demand
+and rising_trend are never filtered by it.
+
+The output carries this as `in_account` - a plain boolean, True if the
+term is Added or Added/Excluded in any campaign it appears in, False
+otherwise - rather than a per-row Added/Excluded status string. A
+representative status picked from whichever campaign occurrence had the
+highest cost would be ambiguous (it could show "excluded" for a term
+that's actually Added in a lower-cost campaign, or vice versa) and
+wouldn't necessarily match what the underexploited filter itself checks.
+in_account mirrors that filter's own "added anywhere" logic exactly, the
+same way Google Ads' own UI reports "already in account" as a single
+boolean rather than a per-occurrence status.
+If the input CSV doesn't have a resolvable term_status column at all,
+every term's in_account is False and the underexploited filter is
+unaffected - the column is optional input, not a hard requirement.
 
 Usage:
     analyze_search_opportunities.py --config configs/<project>.yaml \\
@@ -42,7 +51,7 @@ import ads_common as common
 
 TERM_COLUMNS = ["search_term", "campaign", "clicks", "cost", "conversions", "term_status"]
 OUTPUT_FIELDS = [
-    "search_term", "campaign", "cluster", "brand_term", "term_status",
+    "search_term", "campaign", "cluster", "brand_term", "in_account",
     "clicks", "cost", "conversions", "cpa",
     "baseline_clicks", "growth_pct",
     "signals", "suggested_action",
@@ -107,7 +116,7 @@ def aggregate_by_term(records, cols):
         agg = terms.setdefault(key, {
             "search_term": search_term, "campaign": campaign, "top_cost": -1.0,
             "clicks": 0.0, "cost": 0.0, "conversions": 0.0,
-            "term_status": "none", "added_anywhere": False,
+            "added_anywhere": False,
         })
         agg["clicks"] += clicks
         agg["cost"] += cost
@@ -116,12 +125,14 @@ def aggregate_by_term(records, cols):
         # actually disqualifies underexploited - a term already an active
         # exact-match keyword in any campaign it runs in isn't
         # underexploited there, regardless of which campaign is top-cost.
+        # This is also the output's in_account value directly - no
+        # separate "representative status" is tracked, so there's nothing
+        # for the two to disagree about.
         if status in ("added", "added_excluded"):
             agg["added_anywhere"] = True
         if cost > agg["top_cost"]:
             agg["top_cost"] = cost
             agg["campaign"] = campaign
-            agg["term_status"] = status  # representative status for the context column
     return terms
 
 
@@ -181,7 +192,6 @@ def main():
 
         cluster = common.match_cluster(campaign, clusters)
         is_brand = common.matches_any_keyword(search_term, brand_keywords)
-        term_status = term.get("term_status", "none")
         added_anywhere = term.get("added_anywhere", False)
 
         baseline = baseline_terms.get(key)
@@ -219,7 +229,7 @@ def main():
             "campaign": campaign,
             "cluster": cluster,
             "brand_term": is_brand,
-            "term_status": term_status,
+            "in_account": added_anywhere,
             "clicks": clicks,
             "cost": round(cost, 2),
             "conversions": conversions,

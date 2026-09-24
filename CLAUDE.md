@@ -167,18 +167,35 @@ Each project/account has its own config file under `configs/`
 - PL-UA/US/UK/DE/IT/CZ/DK's `topic_keywords` patterns (Russian Cyrillic
   forms, richer US/UK phrasing, the Denmark/Czech false-positive fixes -
   see the detailed comments in `configs/meest-post-polska.yaml`) were
-  ported 2026-09-21 from a separate branch's independently live-verified
-  findings, not re-verified against this account's real data directly in
-  that session (the Google Ads MCP Connector wasn't available). Confirmed
-  by regex-level testing only (each pattern checked directly against its
-  claimed collision/target strings, including confirming why two of the
-  source branch's patterns - bare boundary-anchored "us"/"uk" - were
-  deliberately NOT ported: both still false-positive on real Polish words
-  with a diacritic immediately adjacent, e.g. "us" inside "usługa"). Run
-  a real search-term pull through `analyze_topic_alignment.py` and check
-  its unclassified/ambiguous output before treating these as fully
-  verified on this account, the same way the original topic_keywords
-  patterns were checked
+  ported 2026-09-21 from a separate branch, then **live-verified 2026-09-21
+  against this account's real search-term data** (a 60-day trailing+
+  baseline pull run through `analyze_topic_alignment.py`, ~3,740 unique
+  terms). Denmark's `\bdani[aei]\b` fix and Czech's lookbehind pattern both
+  held up exactly as designed on real data (45 and 39 real matches
+  respectively, no false positives on the documented collision risks).
+  Three real bugs were found and fixed in that same pass:
+    - PL-IT's bare `"ital"` false-positived on `"digital"` (confirmed live
+      against this account's own Etsy campaigns - "digital products on
+      etsy" etc. wrongly tagged PL-IT; also risked "capital"/"hospital").
+      Fixed with a lookbehind boundary: `(?<![A-Za-z])ital`.
+    - PL-UK had no bare "uk" pattern at all (deliberately omitted - see
+      below), which was a **material** false negative: 121 unique
+      unclassified real terms containing plain "uk" (~973 cost / 439
+      clicks over 60 days), including two confirmed real mismatches
+      ("dhl uk to poland" sitting in Search-Etsy, "paczki z uk do polski
+      inpost" sitting in Search-Międzynarodowe) that the tool couldn't
+      flag with no pattern to match against. Fixed by adding
+      `(?<![a-ząćęłńóśźż])uk(?![a-ząćęłńóśźż])` - a Polish-diacritic-
+      excluding lookaround (same technique as PL-CZ's pattern) that
+      resolves the original "us"/"uk" collision risk (confirmed live to
+      reject "usługa"/"ukąszenie" while still matching "do uk"/"uk to
+      poland"). "us" has the same theoretical risk but showed zero real
+      coverage gap in this account's query mix (consistently "usa", not
+      bare "us") - left unfixed as a documented candidate, not applied
+      speculatively.
+    - PL-DE was missing the German-language spelling "deutschland" (minor,
+      one real example found: "meest post deutschland" unclassified).
+      Added to the pattern list.
 - `analyze_campaign_performance.py`'s quadrant-eligibility floor
   (`thresholds.min_conversions_per_30_days` in config) is **proportional
   to the selected period, not a flat count** — 10 Parcels conversions over
@@ -221,20 +238,75 @@ Each project/account has its own config file under `configs/`
   variance, just flag a swing big enough to be a caution). Both thresholds
   are explicitly adjustable assumptions, not hard rules — state that when
   presenting a tCPA recommendation, don't repeat it as settled guidance
-- **Added/Excluded search-term status (`term_status`) is implemented but
-  NOT YET LIVE-VERIFIED** — built 2026-09-20 against `search_term_view`'s
-  documented `status` field (ADDED/EXCLUDED/ADDED_EXCLUDED/NONE per the
-  Google Ads API), but the Google Ads MCP Connector wasn't available in
-  that session to confirm it's actually selectable via
-  `metadata_get_resource_metadata`, or that `campaign_search_term_view`
-  (the PMax path) carries anything equivalent - **confirm this before
-  relying on it in a real run**. `ads_common.normalize_term_status()`
-  is deliberately tolerant of exact wording (substring match on "add"/
-  "exclud") for this reason. Until verified and wired into a pull,
-  `term_status` is simply absent from input CSVs and every dependent
-  script falls back to its prior (pre-term_status) behavior exactly -
-  this is safe to leave unverified for a while, not a blocker.
-  Handling differs by script/signal, not a blanket filter:
+- **Added/Excluded search-term status (`term_status`) — LIVE-VERIFIED
+  2026-09-21.** `search_term_view.status` (Search path) is selectable/
+  filterable/sortable and returns real ADDED/EXCLUDED/NONE values
+  (confirmed via a 2,000+-row live pull: ADDED/EXCLUDED/NONE all present).
+  The PMax path does **not** have `campaign_search_term_view.status` (that
+  field does not exist on the resource per `metadata_get_resource_metadata`)
+  - its equivalent is `segments.search_term_targeting_status`, confirmed
+  live with the same three commonly-seen values (ADDED/EXCLUDED/NONE).
+  Semantic equivalence (not just matching label strings) was then confirmed
+  2026-09-21 against Google's own API reference: both `search_term_view.status`
+  and `segments.search_term_targeting_status` are typed as the exact same
+  enum, `SearchTermTargetingStatusEnum.SearchTermTargetingStatus`, with the
+  identical description ("whether the search term is currently one of your
+  targeted or excluded keywords") on both fields - not a coincidental label
+  match, the same enum by design. Full value set (both paths, per Google's
+  reference): `ADDED`, `EXCLUDED`, `ADDED_EXCLUDED`, `NONE`, plus the
+  protocol meta-values `UNKNOWN`/`UNSPECIFIED` (return-only/request-only,
+  not real data). Practical caveats confirmed 2026-09-23, documented
+  rather than assumed:
+    - **On the PMax path, `ADDED` and `ADDED_EXCLUDED` should be treated
+      as "can't occur"** - Performance Max has no keywords, so nothing on
+      that path can be directly marked as Added; only `EXCLUDED` and
+      `NONE` are practically meaningful there. `normalize_term_status()`
+      still recognizes all four values on both paths (it has no path-
+      awareness and shouldn't need any - the enum is genuinely shared),
+      but a PMax row normalizing to "added"/"added_excluded" would be
+      unexpected and worth a second look, not routine.
+    - **`UNKNOWN` throws a query error on both paths, identically** -
+      it's a return-only protocol meta-value, not a real status a term
+      can hold, so filtering `search_term_view.status = 'UNKNOWN'` errors
+      out rather than returning zero rows, and the same is true of
+      `segments.search_term_targeting_status = 'UNKNOWN'` on the PMax
+      path - this is not a PMax-specific quirk, both fields reject it the
+      same way. Never build a query that filters either path on `UNKNOWN`.
+    - `ADDED_EXCLUDED` was never observed on either path in a live 90-day
+      window (only `ADDED`/`EXCLUDED`/`NONE` showed up in practice) -
+      noted as an open edge case this account's data hasn't exercised,
+      not as evidence the code handles it correctly. Re-check if it turns
+      up in a future pull, rather than assuming today's untested handling
+      is right.
+  **Status: code wired, not yet re-verified together.** These two
+  caveats and the `segments.search_term_targeting_status` PMax pull
+  wiring (see the Scripts/slash-command entries) were added 2026-09-23
+  without a live MCP session (none was available); the underlying enum
+  equivalence itself was already live-confirmed 2026-09-21 (above), but
+  a fresh session with live access still needs to re-run `term_status`
+  checks across both Search and PMax paths *together*, with this wiring
+  and these caveats in place, before this item is fully closed.
+  `ads_common.normalize_term_status()` already handled
+  `ADDED_EXCLUDED` correctly (substring-matches both "add" and "exclud")
+  before this was confirmed - no code change needed there. `ads_common.py`'s
+  `COLUMN_CANDIDATES` now includes a "search term targeting status" alias
+  for `term_status` so a PMax-sourced CSV resolves correctly (this was a
+  real gap, confirmed by testing `resolve_columns()` against that literal
+  header text before the fix - it silently failed to resolve, degrading to
+  "none" for every PMax row). Ran a real 30-day search-term pull through both
+  `analyze_topic_alignment.py` and `analyze_search_opportunities.py`:
+  `term_status` flowed through with real values in `analyze_topic_alignment.py`'s
+  output (not blank; `analyze_search_opportunities.py`'s output column was
+  later redesigned to `in_account`, a plain boolean - see that script's
+  entry below), "already excluded here" and "already present as a keyword in"
+  both fire correctly on real Excluded/Added rows, `underexploited`
+  correctly excludes every Added-anywhere term (verified against a real
+  high-conversion Added term that would otherwise obviously qualify), and
+  `new_demand`/`rising_trend` correctly keep Excluded terms as context
+  instead of filtering them. `ads_common.normalize_term_status()`'s
+  tolerant substring matching ("add"/"exclud") is no longer a hedge
+  against an unconfirmed field - it stays as reasonable defensive parsing
+  regardless. Handling differs by script/signal, not a blanket filter:
     - `analyze_wasted_spend.py`: deliberately ignores it entirely - a
       term burning budget without conversions is worth flagging whether
       or not it's technically already Excluded (exclusion may not be
@@ -250,9 +322,16 @@ Each project/account has its own config file under `configs/`
       `underexploited` only (a term already Added, in ANY campaign it
       appears in, isn't underexploited by definition - excluded from
       that signal entirely). Never filters `new_demand` or
-      `rising_trend` - a rising-trend term that's currently Excluded is
-      a "reconsider this decision" signal worth surfacing, not noise to
-      hide, so it's included as a context column there instead.
+      `rising_trend`. Its output column is `in_account` - a plain
+      boolean (True if Added or Added/Excluded in any campaign the term
+      appears in), not a representative term_status string. A status
+      picked from whichever campaign occurrence had the highest cost was
+      ambiguous - it could show "excluded" for a term that's actually
+      Added in a lower-cost campaign, or vice versa - and didn't
+      necessarily match what the `underexploited` filter itself checks.
+      `in_account` mirrors that filter's own "added anywhere" logic
+      exactly, the same way Google Ads' own UI reports "already in
+      account" as a single boolean rather than a per-occurrence status.
 - `intent_pattern` (a signal in `analyze_search_opportunities.py`) and
   its supporting config section (`intent_keywords`) and helper
   (`ads_common.match_intents`) were removed 2026-09-20 - it never had a
@@ -260,6 +339,35 @@ Each project/account has its own config file under `configs/`
   surfaced across this project, and its distinction from `new_demand`
   was never clear. The remaining three signals (`new_demand`,
   `underexploited`, `rising_trend`) are considered sufficient
+- **`change_event` (the Google Ads change-log resource) — confirmed live
+  2026-09-21** via `metadata_get_resource_metadata` plus live pulls
+  against this account, ahead of any script in this repo actually using
+  it (see `claude/performance-report-v2`, not yet merged here, for the
+  consumer). Selectable/filterable fields: `change_date_time`,
+  `change_resource_type`, `resource_change_operation`, `campaign`,
+  `ad_group`, `changed_fields`, `old_resource`, `new_resource`,
+  `user_email`, `client_type`, `resource_name`. Sortable: only
+  `change_date_time`, `change_resource_type`, `resource_change_operation`,
+  `user_email` — **not** `resource_name`, the same pagination gotcha as
+  `search_term_view` (cursor on `change_date_time DESC`, dedupe by
+  `resource_name` on ties). Retention is a rolling **~29-day lookback from
+  query time** — a start date exactly 30 days back is rejected
+  ("requested start date is too old") — independent of whatever analysis
+  period is being examined, so a change-log pull is only ever possible
+  when that period overlaps roughly the trailing month; this is the
+  retrospective/forward-only answer: retrospective, but hard-capped to
+  that trailing window, never further back. `LIMIT` must be ≤ 10000, per
+  the connector's own tool hint. Granularity: `change_event.campaign`
+  links a campaign-scoped change; `change_event.ad_group` links an
+  ad-group-scoped one (ad/ad_group/ad_group_ad/ad_group_criterion-level
+  changes) — there is no separate keyword/criterion identifier field, so
+  a specific keyword change is only distinguishable via
+  `changed_fields`/`old_resource`/`new_resource` on an
+  `AD_GROUP_CRITERION`-typed event, not a dedicated column. Confirmed
+  live on this account: `ASSET` CREATE events dominate day-to-day (no
+  `campaign`/`ad_group` link), alongside real `CAMPAIGN` (status),
+  `CAMPAIGN_BUDGET` (amountMicros), etc. changes with those links
+  populated.
 
 ## Scripts
 - `analyze_wasted_spend.py` — search-term waste analysis
@@ -293,4 +401,8 @@ Each project/account has its own config file under `configs/`
   using the active config's defaults, with inline overrides supported
 - `/find-opportunities` — runs the full opportunity-discovery pipeline
   end-to-end using the active config's defaults, with inline overrides
-  supported
+  supported. **Standalone and opt-in** — run only when explicitly asked
+  for by name or by a request specifically about new-demand/
+  underexploited/rising-trend signals. It is never part of a default or
+  combined analysis; a generic "run the analysis"/"give me a report"
+  request means `/analyze-waste` alone, not this command bundled in too

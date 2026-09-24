@@ -26,17 +26,20 @@ live ENABLED campaign is) - it only changes the tracked_no_campaign
 suggested action from "new campaign candidate" to "evaluate/reactivate
 existing campaign".
 
-Added/Excluded status (term_status - NOT yet live-verified as available
-via the Google Ads MCP connector, see CLAUDE.md's Known technical notes)
-refines the "single" mismatch suggestion two ways: if the term is already
-Excluded in its current (wrong) campaign, the mismatch is noted without
-repeating a redundant action - Google is already suppressing it there, so
-re-homing isn't urgent. If the term is already Added as a keyword in one
-of the re-home target campaigns, that's noted alongside the suggestion
-("already present in the correct campaign"). Until the column is
-confirmed available, every row's term_status is "none" and this logic is
-inert (falls through to the plain re-home suggestion, matching prior
-behavior exactly).
+Added/Excluded status (term_status - live-verified 2026-09-21 on the
+Search path (search_term_view.status) and confirmed as the same enum on
+the PMax path (segments.search_term_targeting_status), see CLAUDE.md's
+Known technical notes; a fresh live re-check of both paths together is
+still pending) refines the "single" mismatch suggestion two ways: if the
+term is already Excluded in its current (wrong) campaign, the mismatch is
+noted without repeating a redundant action - Google is already
+suppressing it there, so re-homing isn't urgent. If the term is already
+Added as a keyword in one of the re-home target campaigns, that's noted
+alongside the suggestion ("already present in the correct campaign"). If
+the input CSV doesn't have a resolvable term_status column at all, every
+row's term_status is "none" and this logic is inert (falls through to the
+plain re-home suggestion) - the column is optional input, not a hard
+requirement.
 
 Usage:
     analyze_topic_alignment.py --config configs/<project>.yaml
@@ -89,8 +92,8 @@ def build_term_campaign_status(records, cols):
     is used to check whether a term is already Added as a keyword in a
     *different* campaign than the one a given row happens to be in (e.g.
     a mismatch's re-home target). Empty when term_status isn't a resolved
-    column at all (not yet live-verified as available - see CLAUDE.md),
-    so the lookup is harmlessly inert until then.
+    column at all - it's optional input, so the lookup is harmlessly inert
+    when it's absent.
     """
     lookup = {}
     if "term_status" not in cols:
