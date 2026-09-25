@@ -1,11 +1,77 @@
 #!/usr/bin/env python3
-"""Campaign performance narrative report (v1: Ads-only, GA4 revenue merge
-is a later version, not built toward here).
+"""Campaign performance report (v2: structured findings, Ads-only - GA4
+revenue merge is a later version, not built toward here).
 
-Classifies each cohort (destination cluster) and each campaign within it
-into a CAC x volume quadrant relative to a benchmark, using "Parcels"
-(config's primary_conversion_name) as the sole efficiency metric. Other
-conversion actions may appear in raw data but never drive scoring.
+ARCHITECTURE (v2 change from v1): this script no longer renders a markdown
+narrative itself. It emits one structured JSON file (three top-level
+sections - what_was_done / performance / next_steps - matching the report
+structure below) plus CSV backups of the cohort/campaign rows. Composing
+the actual narrative prose - explaining what a correlation likely means,
+phrasing the "next steps" conclusions - happens in the Claude Code session
+that invokes this script, reading the JSON, the same way script-output
+summaries are already written elsewhere in this toolkit. This keeps every
+number reproducible/testable in code while keeping judgment-language out
+of the script. v1's render_report()/markdown output has been removed, not
+just deprecated.
+
+Report structure (the JSON mirrors this):
+  1. what_was_done      - factual account change list for the period: new/
+                           paused campaigns, ad group/asset group changes,
+                           ad copy edits, budget changes, bid strategy/
+                           target changes, geo/keyword/audience changes.
+                           No analysis, just facts. Populated only if the
+                           caller supplies --changes - see "Change-log
+                           schema" below - otherwise emits
+                           {"status": "not_available", "changes": []}.
+  2. performance         - account-level before/after, then the same
+                           breakdown per cluster (cohort), then per-campaign
+                           within each cluster - CAC x volume quadrant
+                           classification (Star/Efficient/Review/
+                           Underperformer, relative to a benchmark),
+                           conversion rate and Lost IS as diagnostics, and a
+                           correlation_flags list per cluster/campaign
+                           cross-referencing what_was_done's changes against
+                           that entity's performance shift - see
+                           build_correlation_flags() and its real
+                           limitation (campaign-scoped changes only).
+  3. next_steps          - scale/cut/edit candidates and top-by-metric
+                           rankings, derived from the same quadrant data,
+                           at both the cluster and campaign level.
+
+Change-log schema (CLAUDE.md's Known technical notes has the full
+write-up; confirmed 2026-09-21 via metadata_get_resource_metadata + live
+pulls, in a parallel verification session, against this toolkit's actual
+account):
+  Resource: change_event. Fields: change_date_time, change_resource_type,
+  resource_change_operation, campaign, ad_group, changed_fields,
+  old_resource, new_resource, user_email, client_type, resource_name.
+  Sortable: change_date_time, change_resource_type,
+  resource_change_operation, user_email only (not resource_name - same
+  pagination gotcha as search_term_view, relevant once a live pull is
+  wired into /performance-report). Retention: retrospective, but hard-
+  capped to a rolling ~29-day window from *query time* - independent of
+  whatever --period-start/--period-end dates are passed. A change-log
+  pull is only possible when the analysis period overlaps roughly the
+  trailing month; older periods get {"status": "not_available"}, same as
+  omitting --changes entirely, not an error.
+  Granularity: campaign-scoped changes carry a non-empty "campaign"
+  field; ad-group/ad/keyword-scoped changes carry only "ad_group" (no
+  campaign field) - there's no dedicated keyword/criterion field, so a
+  specific keyword change is only identifiable via changed_fields/
+  old_resource/new_resource on an AD_GROUP_CRITERION-typed event.
+  build_correlation_flags() currently matches on the "campaign" field
+  only - ad-group-scoped changes pass through into what_was_done's raw
+  change list but are NOT correlated to any cluster/campaign, since this
+  script has no ad_group -> campaign mapping wired in (a different join
+  than the search-term scripts already do, for a different reason - see
+  CLAUDE.md). This is a real, documented gap, not an oversight - wire that
+  mapping in if ad-group-level correlation (ad copy edits, keyword-level
+  changes) turns out to matter in practice.
+  Still --changes CSV, not a live MCP pull: this script itself has no
+  Google Ads MCP access (it's a pure CSV-in, JSON-out script, same as
+  every other script in this toolkit) - /performance-report's job is to
+  pull change_event live (once wired in there) and hand this script a CSV
+  in load_change_events()'s expected shape.
 
 Quadrants (never a single composite score - see causal_note() below for a
 qualitative explanation layer that sits *alongside* this, not inside it):
@@ -26,7 +92,9 @@ thresholds.new_campaign_window_days of the period's end - low volume here
 is upside potential, not a problem) vs. stagnant (older, still below floor
 - worth a second look) vs. unknown (no usable start_date in the input).
 Clusters in config's exclude_from_scoring (brand) are never classified or
-age-split, though they still appear in raw CSV output.
+age-split, though they still appear in raw CSV/JSON output. The account
+rollup (performance.account) is a true account total and always includes
+excluded clusters, unlike the scored cohort/campaign peer groups.
 
 Lost Impression Share (rank/budget) and conversion rate (vs. the account
 average) never enter the quadrant formula itself - they only feed
@@ -72,15 +140,25 @@ unambiguous sibling elsewhere in the same column. Only round to 2 decimals
 as a fallback if a column could plausibly have zero unambiguous values
 anywhere in it (rare).
 
+NOT YET LIVE-VERIFIED: this v2 restructure (account rollup, conversion-rate
+deltas, what_was_done/next_steps shape, correlation-flag wiring) has not
+been run against a real MCP pull - it joins the existing backlog of
+regex/logic-verified-only items (term_status, the ported topic_keywords
+patterns). Run it against a real period/comparison pull and sanity-check
+the JSON before treating any of it as confirmed.
+
 Usage:
     analyze_campaign_performance.py --config configs/<project>.yaml \\
         --period period_metrics.csv --period-start 2026-08-17 --period-end 2026-09-15 \\
         --comparison comparison_metrics.csv --comparison-start 2026-07-18 --comparison-end 2026-08-16 \\
         [--benchmark cluster|account|target] \\
         [--target target_metrics.csv --target-start ... --target-end ...] \\
-        [--output file.md]
+        [--changes change_events.csv] \\
+        [--output file.json]
 """
 import argparse
+import csv
+import json
 import sys
 from datetime import date
 from pathlib import Path
@@ -95,19 +173,22 @@ OPTIONAL_METRIC_COLUMNS = [
 COHORT_CSV_FIELDS = [
     "cluster", "status", "quadrant", "causal_note", "lost_is_diagnostic", "suggested_action",
     "cost", "cost_change_pct", "conversions", "conversions_change_pct",
-    "cac", "cac_change_pct", "conversions_value", "campaign_count",
+    "cac", "cac_change_pct", "conversion_rate", "conversion_rate_change_pct",
+    "conversions_value", "campaign_count",
 ]
 CAMPAIGN_CSV_FIELDS = [
     "campaign", "cluster", "channel_type", "status", "quadrant", "causal_note",
     "lost_is_diagnostic", "suggested_action", "age_status", "age_days", "tcpa_recommendation",
     "cost", "cost_change_pct", "conversions", "conversions_change_pct",
-    "cac", "cac_change_pct", "conversions_value",
+    "cac", "cac_change_pct", "conversion_rate", "conversion_rate_change_pct", "conversions_value",
 ]
 
 # Hard floor under the proportional quadrant-eligibility bar (thresholds.
 # min_conversions_per_30_days * period_days / 30) - protects a very short
 # custom period from letting 1 conversion count as "sufficient data".
 MIN_QUADRANT_FLOOR_ABSOLUTE = 3
+
+NEXT_STEPS_TOP_N = 10
 
 
 def _parse_date(parser, flag, value):
@@ -136,7 +217,14 @@ def parse_args():
     parser.add_argument("--target", default=None, help="Campaign-metrics CSV for the trailing benchmark window (required with --benchmark target)")
     parser.add_argument("--target-start", default=None, help="Trailing benchmark window start date, YYYY-MM-DD (required with --benchmark target)")
     parser.add_argument("--target-end", default=None, help="Trailing benchmark window end date, YYYY-MM-DD (required with --benchmark target)")
-    parser.add_argument("--output", default=None, help="Markdown report path (default: <project>-campaign-performance.md)")
+    parser.add_argument("--changes", default=None,
+                         help="change_event CSV for the period (confirmed schema: change_date_time, "
+                              "change_resource_type, resource_change_operation, campaign, ad_group, "
+                              "changed_fields, old_resource, new_resource, user_email, client_type - see "
+                              "module docstring's 'Change-log schema') - optional, populates what_was_done "
+                              "and drives real correlation_flags matching for campaign-scoped changes. "
+                              "Omit to leave what_was_done as not_available.")
+    parser.add_argument("--output", default=None, help="Structured-findings JSON path (default: <project>-campaign-performance.json)")
     args = parser.parse_args()
 
     args.period_start = _parse_date(parser, "--period-start", args.period_start)
@@ -184,6 +272,152 @@ def load_metrics_csv(path, label):
         sys.exit(f"Could not find required column(s) {missing} in {label} ({path}) "
                   f"(saw headers: {list(records[0].keys())})")
     return common.aggregate_campaign_metrics(records, cols)
+
+
+def load_change_events(path):
+    """Loader for a change_event CSV in the confirmed schema (see module
+    docstring's "Change-log schema"): change_date_time,
+    change_resource_type, resource_change_operation, campaign, ad_group,
+    changed_fields, old_resource, new_resource, user_email, client_type,
+    resource_name. Reads a plain header row directly (csv.DictReader)
+    rather than common.load_table()'s Google-Ads-UI-export header
+    detection: that heuristic requires 2+ column labels matching
+    HEADER_HINTS (built for search-term/campaign exports), which a
+    change_event pull's own columns won't hit, and this toolkit's own
+    MCP-pull CSVs are hand-built without a UI export's preamble row anyway.
+    Column matching is case-insensitive and tolerates an underscore or
+    space variant, so both a raw API-field-named pull and a friendlier
+    hand-built CSV resolve the same way.
+
+    "description" is synthesized here (operation + resource type +
+    changed fields, e.g. "UPDATE CAMPAIGN_BUDGET - changed: amount_micros")
+    for what_was_done's factual list - built directly from the confirmed
+    fields, not a guess at what changed_fields' raw values mean, since
+    that's exactly the kind of interpretation the "no analysis, just
+    facts" rule (see module docstring, section 1) says to leave out.
+
+    Returns None (not []) when --changes wasn't passed, so callers can tell
+    "no changes happened" apart from "we didn't look".
+    """
+    if not path:
+        return None
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        return []
+    lower_map = {k.strip().lower(): k for k in rows[0].keys() if k}
+
+    def col(*candidates):
+        for candidate in candidates:
+            if candidate in lower_map:
+                return lower_map[candidate]
+        return None
+
+    date_col = col("change_date_time", "change date time", "date")
+    type_col = col("change_resource_type", "change resource type", "change type")
+    op_col = col("resource_change_operation", "resource change operation", "operation")
+    campaign_col = col("campaign", "campaign name")
+    ad_group_col = col("ad_group", "ad group")
+    changed_fields_col = col("changed_fields", "changed fields")
+    old_col = col("old_resource", "old resource")
+    new_col = col("new_resource", "new resource")
+    user_col = col("user_email", "user email")
+    client_col = col("client_type", "client type")
+
+    def get(row, c):
+        return (row.get(c) or "").strip() if c else ""
+
+    changes = []
+    for row in rows:
+        change_type = get(row, type_col)
+        operation = get(row, op_col)
+        changed_fields = get(row, changed_fields_col)
+        description = f"{operation} {change_type}".strip()
+        if changed_fields:
+            description += f" - changed: {changed_fields}"
+        changes.append({
+            "date": get(row, date_col),
+            "change_resource_type": change_type,
+            "operation": operation,
+            "campaign": get(row, campaign_col),
+            "ad_group": get(row, ad_group_col),
+            "changed_fields": changed_fields,
+            "old_resource": get(row, old_col),
+            "new_resource": get(row, new_col),
+            "user_email": get(row, user_col),
+            "client_type": get(row, client_col),
+            "description": description,
+        })
+    return changes
+
+
+def build_what_was_done(change_events):
+    if change_events is None:
+        return {
+            "status": "not_available",
+            "reason": (
+                "No --changes CSV was passed. The change_event resource's schema is confirmed (see "
+                "CLAUDE.md's Known technical notes / this module's docstring), but this script has no "
+                "live Google Ads MCP access itself (it's CSV-in, JSON-out like every other script here) "
+                "- /performance-report pulls change_event live and passes it via --changes, when the "
+                "analysis period overlaps the resource's ~29-day rolling retention window."
+            ),
+            "changes": [],
+        }
+    return {"status": "available", "reason": None, "changes": change_events}
+
+
+def changes_in_window(changes, window_start, window_end):
+    """Changes whose date falls within [window_start, window_end]
+    (inclusive) - anything outside that can't explain a shift between
+    these two specific periods, even though the change_event query itself
+    is scoped independently (a rolling ~29-day window from *query* time,
+    not from these period dates - see module docstring's "Change-log
+    schema"). A change whose date fails to parse is kept, not dropped, so
+    an unexpected date format surfaces as noise in what_was_done rather
+    than silently vanishing.
+    """
+    kept = []
+    for c in changes:
+        d = parse_iso_date(c.get("date", ""))
+        if d is None or window_start <= d <= window_end:
+            kept.append(c)
+    return kept
+
+
+def build_correlation_flags(campaign_names, changes):
+    """Cross-reference one cluster's (a list of its campaign names) or one
+    campaign's (a single name) performance shift against account changes
+    logged during the comparison-to-period window.
+
+    Matches only on a change's "campaign" field - campaign-scoped changes
+    (new/paused campaigns, budget changes, bid strategy/target changes)
+    are covered. Ad-group/ad/keyword-scoped changes (ad copy edits,
+    keyword adds) carry only an "ad_group" field with no "campaign" - see
+    module docstring's "Change-log schema" for why those are NOT matched
+    here (no ad_group -> campaign mapping is wired into this script) and
+    still appear in what_was_done's raw change list, just not correlated
+    to any cluster/campaign. This is a real, documented gap, not silently
+    dropped data.
+
+    `changes` is expected to already be filtered to the relevant window
+    (see changes_in_window() - called once in main(), not per entity).
+    """
+    if not changes:
+        return []
+    names = set(campaign_names) if isinstance(campaign_names, (list, set, tuple)) else {campaign_names}
+    return [
+        {
+            "date": c["date"],
+            "campaign": c["campaign"],
+            "change_resource_type": c["change_resource_type"],
+            "operation": c["operation"],
+            "changed_fields": c["changed_fields"],
+            "description": c["description"],
+        }
+        for c in changes
+        if c.get("campaign") in names
+    ]
 
 
 def build_cohorts(campaigns_by_name, clusters, exclude_from_scoring):
@@ -248,11 +482,22 @@ def conversion_rate(conversions, clicks):
 
 
 def parse_iso_date(raw):
+    """Parses a bare date ("2026-08-23") or a full datetime string
+    ("2026-08-23 14:12:39", or with a "T" separator) down to just the date
+    part. Confirmed live 2026-09-21 (in a parallel verification session)
+    that campaign.start_date_time comes back as a full datetime, not a
+    bare date - date.fromisoformat()'s strict parsing silently rejected
+    every real value before this fix, so every campaign fell into
+    campaign_age_status()'s "unknown" bucket regardless of its actual age.
+    Also used for change_event's change_date_time, which is the same
+    Google Ads API datetime shape.
+    """
     raw = (raw or "").strip()
     if not raw:
         return None
+    date_part = raw.split(" ")[0].split("T")[0]
     try:
-        return date.fromisoformat(raw)
+        return date.fromisoformat(date_part)
     except ValueError:
         return None
 
@@ -348,7 +593,8 @@ def campaigns_by_cluster_list(campaigns_by_name, clusters, exclude_from_scoring)
 def classify_campaigns(period_campaigns, comparison_campaigns, clusters, exclude_from_scoring,
                         min_conversions, benchmark_mode, cluster_targets, flat_target,
                         account_avg_conv_rate, period_end, new_campaign_window_days,
-                        period_days, tcpa_min_conversions_per_30_days, tcpa_stability_pct):
+                        period_days, tcpa_min_conversions_per_30_days, tcpa_stability_pct,
+                        windowed_changes):
     rows = []
     for name, m in period_campaigns.items():
         cluster = common.match_cluster(name, clusters)
@@ -376,6 +622,8 @@ def classify_campaigns(period_campaigns, comparison_campaigns, clusters, exclude
         cac_delta = pct_change(cac, comparison_cac) if (cac is not None and comparison_cac is not None) else None
 
         conv_rate = conversion_rate(m["conversions"], m["clicks"])
+        comparison_conv_rate = conversion_rate(comparison["conversions"], comparison["clicks"]) if comparison else None
+        conv_rate_delta = pct_change(conv_rate, comparison_conv_rate) if (conv_rate is not None and comparison_conv_rate is not None) else None
         note = causal_note(quadrant, conv_rate, account_avg_conv_rate,
                             m.get("lost_is_rank"), m.get("lost_is_budget")) if status == "scored" else None
 
@@ -404,9 +652,93 @@ def classify_campaigns(period_campaigns, comparison_campaigns, clusters, exclude
             "conversions_change_pct": round(conv_delta, 1) if conv_delta is not None else "",
             "cac": round(cac, 2) if cac is not None else "",
             "cac_change_pct": round(cac_delta, 1) if cac_delta is not None else "",
+            "conversion_rate": round(conv_rate * 100, 2) if conv_rate is not None else "",
+            "conversion_rate_change_pct": round(conv_rate_delta, 1) if conv_rate_delta is not None else "",
             "conversions_value": round(m["conversions_value"], 2),
+            "correlation_flags": build_correlation_flags(name, windowed_changes),
         })
     return rows
+
+
+def build_account_snapshot(campaigns_by_name):
+    """True account total - unlike the scored cohort/campaign peer groups,
+    this always includes exclude_from_scoring clusters (e.g. brand), since
+    "account-level before/after" means the whole account, not just the
+    scored slice of it."""
+    cost = sum(m["cost"] for m in campaigns_by_name.values())
+    conversions = sum(m["conversions"] for m in campaigns_by_name.values())
+    conversions_value = sum(m["conversions_value"] for m in campaigns_by_name.values())
+    clicks = sum(m["clicks"] for m in campaigns_by_name.values())
+    impressions = sum(m["impressions"] for m in campaigns_by_name.values())
+    cac = common.compute_cac(cost, conversions)
+    cr = conversion_rate(conversions, clicks)
+    return {
+        "cost": round(cost, 2), "conversions": round(conversions, 2),
+        "conversions_value": round(conversions_value, 2),
+        "clicks": round(clicks, 2), "impressions": round(impressions, 2),
+        "cac": round(cac, 2) if cac is not None else None,
+        "conversion_rate": round(cr * 100, 2) if cr is not None else None,
+    }
+
+
+ACCOUNT_DELTA_FIELDS = ["cost", "conversions", "conversions_value", "clicks", "impressions", "cac", "conversion_rate"]
+
+
+def build_account_deltas(period_snap, comparison_snap):
+    deltas = {}
+    for field in ACCOUNT_DELTA_FIELDS:
+        p, c = period_snap.get(field), comparison_snap.get(field)
+        deltas[field + "_change_pct"] = round(pct_change(p, c), 1) if (p is not None and c is not None) else None
+    return deltas
+
+
+def _rank_row(r, kind):
+    row = {
+        "kind": kind, "cluster": r["cluster"], "quadrant": r["quadrant"],
+        "cost": r["cost"], "conversions": r["conversions"], "cac": r["cac"],
+        "lost_is_diagnostic": r["lost_is_diagnostic"], "suggested_action": r["suggested_action"],
+    }
+    if kind == "campaign":
+        row["campaign"] = r["campaign"]
+        row["tcpa_recommendation"] = r["tcpa_recommendation"]
+    return row
+
+
+def build_next_steps(cohort_rows, campaign_rows):
+    """Scale/cut/edit candidates and top-by-metric rankings at both the
+    cluster and campaign level, derived from the same quadrant data as the
+    performance section - no new computation, just re-sorting/re-grouping
+    what's already been classified."""
+    scored_clusters = [r for r in cohort_rows if r["status"] == "scored"]
+    scored_campaigns = [r for r in campaign_rows if r["status"] == "scored"]
+
+    def top(rows, kind, quadrants, n=NEXT_STEPS_TOP_N):
+        matches = sorted((r for r in rows if r["quadrant"] in quadrants), key=lambda r: -r["cost"])
+        return [_rank_row(r, kind) for r in matches[:n]]
+
+    scale_quadrants = ("Star", "Efficient (underexploited)")
+    return {
+        "scale_candidates": {
+            "clusters": top(scored_clusters, "cluster", scale_quadrants),
+            "campaigns": top(scored_campaigns, "campaign", scale_quadrants),
+        },
+        "cut_candidates": {
+            "clusters": top(scored_clusters, "cluster", ("Underperformer",)),
+            "campaigns": top(scored_campaigns, "campaign", ("Underperformer",)),
+        },
+        "edit_candidates": {
+            "clusters": top(scored_clusters, "cluster", ("Review (high spend, high volume)",)),
+            "campaigns": top(scored_campaigns, "campaign", ("Review (high spend, high volume)",)),
+        },
+        "top_by_conversions": {
+            "clusters": [_rank_row(r, "cluster") for r in sorted(scored_clusters, key=lambda r: -r["conversions"])[:5]],
+            "campaigns": [_rank_row(r, "campaign") for r in sorted(scored_campaigns, key=lambda r: -r["conversions"])[:5]],
+        },
+        "unused_potential_headroom": [
+            _rank_row(r, "campaign") for r in scored_campaigns
+            if r["quadrant"] == "Efficient (underexploited)" and r["lost_is_diagnostic"]
+        ],
+    }
 
 
 def main():
@@ -427,12 +759,19 @@ def main():
     # see the config comment next to min_conversions_per_30_days.
     min_conversions = max(MIN_QUADRANT_FLOOR_ABSOLUTE, round(min_conversions_per_30_days * args.period_days / 30))
 
-    output_path = args.output or f"{project_name}-campaign-performance.md"
+    output_path = args.output or f"{project_name}-campaign-performance.json"
     cohort_csv_path = str(Path(output_path).with_suffix("")) + "-cohorts.csv"
     campaign_csv_path = str(Path(output_path).with_suffix("")) + "-campaigns.csv"
 
     period_campaigns = load_metrics_csv(args.period, "period")
     comparison_campaigns = load_metrics_csv(args.comparison, "comparison")
+    change_events = load_change_events(args.changes)
+    what_was_done = build_what_was_done(change_events)
+    # Only changes that could plausibly explain a shift between these two
+    # specific periods feed correlation_flags - see changes_in_window()'s
+    # docstring for why this is a separate window from the change_event
+    # query's own retention window.
+    windowed_changes = changes_in_window(what_was_done["changes"], args.comparison_start, args.period_end)
 
     period_cohorts = build_cohorts(period_campaigns, clusters, exclude_from_scoring)
     comparison_cohorts = build_cohorts(comparison_campaigns, clusters, exclude_from_scoring)
@@ -505,6 +844,8 @@ def main():
         cac_delta = pct_change(cac, comparison_cac) if (cac is not None and comparison_cac is not None) else None
 
         cohort_conv_rate = conversion_rate(cohort["conversions"], cohort["clicks"])
+        comparison_conv_rate = conversion_rate(comparison["conversions"], comparison["clicks"]) if comparison else None
+        conv_rate_delta = pct_change(cohort_conv_rate, comparison_conv_rate) if (cohort_conv_rate is not None and comparison_conv_rate is not None) else None
         note = causal_note(quadrant, cohort_conv_rate, account_avg_conv_rate,
                             lost_is_rank, lost_is_budget) if status == "scored" else None
 
@@ -521,175 +862,82 @@ def main():
             "conversions_change_pct": round(conv_delta, 1) if conv_delta is not None else "",
             "cac": round(cac, 2) if cac is not None else "",
             "cac_change_pct": round(cac_delta, 1) if cac_delta is not None else "",
+            "conversion_rate": round(cohort_conv_rate * 100, 2) if cohort_conv_rate is not None else "",
+            "conversion_rate_change_pct": round(conv_rate_delta, 1) if conv_rate_delta is not None else "",
             "conversions_value": round(cohort["conversions_value"], 2),
             "campaign_count": len(cohort["campaigns"]),
+            "correlation_flags": build_correlation_flags([m["campaign"] for m in cohort["campaigns"]], windowed_changes),
         })
 
-    common.write_csv(cohort_csv_path, COHORT_CSV_FIELDS, cohort_rows)
+    common.write_csv(cohort_csv_path, COHORT_CSV_FIELDS,
+                      [{k: v for k, v in row.items() if k in COHORT_CSV_FIELDS} for row in cohort_rows])
 
     campaign_rows = classify_campaigns(
         period_campaigns, comparison_campaigns, clusters, exclude_from_scoring,
         min_conversions, args.benchmark, cluster_campaign_targets or {}, flat_campaign_target,
         account_avg_conv_rate, args.period_end, new_campaign_window_days,
         args.period_days, tcpa_min_conversions_per_30_days, tcpa_stability_pct,
+        windowed_changes,
     )
     campaign_rows.sort(key=lambda r: -r["cost"])
-    common.write_csv(campaign_csv_path, CAMPAIGN_CSV_FIELDS, campaign_rows)
+    common.write_csv(campaign_csv_path, CAMPAIGN_CSV_FIELDS,
+                      [{k: v for k, v in row.items() if k in CAMPAIGN_CSV_FIELDS} for row in campaign_rows])
 
-    campaigns_by_cluster_for_report = {}
+    campaigns_by_cluster_for_output = {}
     for row in campaign_rows:
-        campaigns_by_cluster_for_report.setdefault(row["cluster"], []).append(row)
+        campaigns_by_cluster_for_output.setdefault(row["cluster"], []).append(row)
 
-    report = render_report(
-        project_name, args, primary_conversion, min_conversions,
-        target_cac, target_volume, benchmark_note, cohort_rows, campaigns_by_cluster_for_report,
-    )
-    Path(output_path).write_text(report, encoding="utf-8")
+    account_period_snapshot = build_account_snapshot(period_campaigns)
+    account_comparison_snapshot = build_account_snapshot(comparison_campaigns)
+    account_deltas = build_account_deltas(account_period_snapshot, account_comparison_snapshot)
 
-    print(f"Campaign performance report for {project_name}")
+    clusters_out = [
+        {**row, "campaigns": campaigns_by_cluster_for_output.get(row["cluster"], [])}
+        for row in cohort_rows
+    ]
+
+    output = {
+        "project_name": project_name,
+        "for_narrative_composition_by": (
+            "Claude Code, reading this file - this script emits structured findings only; see the "
+            "module docstring's ARCHITECTURE note for why narrative prose is not generated here."
+        ),
+        "period": {"start": str(args.period_start), "end": str(args.period_end), "label": args.period_label, "days": args.period_days},
+        "comparison": {"start": str(args.comparison_start), "end": str(args.comparison_end), "label": args.comparison_label},
+        "benchmark": {
+            "mode": args.benchmark, "note": benchmark_note,
+            "target_cac": round(target_cac, 2) if target_cac is not None else None,
+            "target_volume": round(target_volume, 1) if target_volume is not None else None,
+        },
+        "primary_conversion_name": primary_conversion,
+        "quadrant_floor": min_conversions,
+        "what_was_done": what_was_done,
+        "performance": {
+            "account": {
+                "period": account_period_snapshot,
+                "comparison": account_comparison_snapshot,
+                "deltas": account_deltas,
+            },
+            "clusters": clusters_out,
+        },
+        "next_steps": build_next_steps(cohort_rows, campaign_rows),
+    }
+    Path(output_path).write_text(json.dumps(output, indent=2), encoding="utf-8")
+
+    print(f"Campaign performance findings for {project_name}")
     print(f"  Period: {args.period_label}  vs  Comparison: {args.comparison_label}")
     print(f"  Benchmark: {args.benchmark} (target CAC={target_cac:.2f} target volume={target_volume:.1f})" if target_cac else f"  Benchmark: {args.benchmark} (no target - insufficient scored data)")
+    print(f"  What was done: {what_was_done['status']}"
+          + ("" if what_was_done["status"] == "available" else " (no --changes passed)"))
     print(f"  Cohorts: {len(cohort_rows)} ({sum(1 for r in cohort_rows if r['status']=='scored')} scored, "
           f"{sum(1 for r in cohort_rows if r['status']=='insufficient_data')} insufficient data, "
           f"{sum(1 for r in cohort_rows if r['status']=='excluded')} excluded)")
     print(f"  Campaigns: {len(campaign_rows)} ({sum(1 for r in campaign_rows if r['status']=='scored')} scored, "
           f"{sum(1 for r in campaign_rows if r['status']=='insufficient_data')} insufficient data, "
           f"{sum(1 for r in campaign_rows if r['status']=='excluded')} excluded)")
-    print(f"  Report: {output_path}")
+    print(f"  Structured findings: {output_path}")
     print(f"  Cohort CSV: {cohort_csv_path}")
     print(f"  Campaign CSV: {campaign_csv_path}")
-
-
-def fmt_delta(pct):
-    if pct == "" or pct is None:
-        return "n/a (no comparison-period data)"
-    sign = "+" if pct >= 0 else ""
-    return f"{sign}{pct:.1f}%"
-
-
-CHANNEL_ORDER = {"SEARCH": 0, "PERFORMANCE_MAX": 1}
-
-
-AGE_LABELS = {
-    "new": "NEW campaign, upside potential",
-    "stagnant": "stagnant - running a while, still below floor",
-    "unknown": "start date unknown",
-}
-
-
-def render_campaign_lines(campaigns, primary_conversion, indent="  "):
-    """Nested campaign detail for one cohort, grouped by channel type
-    (Search, then PMax, then anything else alphabetically), sorted by cost
-    descending within each group."""
-    lines = []
-    grouped = {}
-    for c in campaigns:
-        grouped.setdefault(c["channel_type"] or "OTHER", []).append(c)
-    for channel in sorted(grouped, key=lambda ch: (CHANNEL_ORDER.get(ch, 99), ch)):
-        lines.append(f"{indent}**{channel.title().replace('_', ' ')}:**")
-        for c in sorted(grouped[channel], key=lambda r: -r["cost"]):
-            if c["status"] == "scored":
-                tag = f" — {c['causal_note']}" if c["causal_note"] else ""
-                tcpa = f"\n{indent}  tCPA: {c['tcpa_recommendation']}" if c["tcpa_recommendation"] else ""
-                lines.append(
-                    f"{indent}- `{c['campaign']}` — **{c['quadrant']}**{tag}: cost {c['cost']} "
-                    f"({fmt_delta(c['cost_change_pct'])}), {primary_conversion} {c['conversions']} "
-                    f"({fmt_delta(c['conversions_change_pct'])}), CAC {c['cac']} ({fmt_delta(c['cac_change_pct'])}) "
-                    f"— {c['suggested_action']}{tcpa}"
-                )
-            elif c["status"] == "insufficient_data":
-                age_note = AGE_LABELS.get(c["age_status"], c["age_status"])
-                if c["age_days"] != "":
-                    age_note += f", {c['age_days']}d old"
-                lines.append(
-                    f"{indent}- `{c['campaign']}` — insufficient data ({age_note}): "
-                    f"{c['conversions']} {primary_conversion}, cost {c['cost']}"
-                )
-            else:
-                lines.append(f"{indent}- `{c['campaign']}` — excluded: cost {c['cost']}, {c['conversions']} {primary_conversion}")
-    return lines
-
-
-def render_report(project_name, args, primary_conversion, min_conversions,
-                   target_cac, target_volume, benchmark_note, cohort_rows, campaigns_by_cluster):
-    lines = []
-    lines.append(f"# Campaign Performance Report — {project_name}")
-    lines.append("")
-    lines.append(f"**Period analyzed:** {args.period_label}")
-    lines.append(f"**Comparison period:** {args.comparison_label}")
-    lines.append(f"**Benchmark mode:** `{args.benchmark}` — {benchmark_note}")
-    if target_cac is not None:
-        lines.append(f"**Benchmark target:** CAC ≤ {target_cac:.2f}, volume ≥ {target_volume:.1f} {primary_conversion} conversions")
-    lines.append(f"**Efficiency metric:** {primary_conversion} conversions only (other conversion actions excluded from scoring)")
-    lines.append(f"**Quadrant floor:** {min_conversions} {primary_conversion} conversions for this {args.period_days}-day "
-                  f"period (proportional, not flat - see thresholds.min_conversions_per_30_days in config); below it, "
-                  f"a cohort/campaign is \"insufficient data\", not classified either way")
-    lines.append("")
-
-    scored = [r for r in cohort_rows if r["status"] == "scored"]
-    insufficient = [r for r in cohort_rows if r["status"] == "insufficient_data"]
-    excluded = [r for r in cohort_rows if r["status"] == "excluded"]
-
-    lines.append("## What changed")
-    lines.append("")
-    if scored:
-        for r in scored:
-            lines.append(
-                f"- **{r['cluster']}**: cost {fmt_delta(r['cost_change_pct'])}, "
-                f"{primary_conversion} conversions {fmt_delta(r['conversions_change_pct'])}, "
-                f"CAC {fmt_delta(r['cac_change_pct'])} to {r['cac']}"
-            )
-    else:
-        lines.append("- No cohorts cleared the quadrant floor this period.")
-    lines.append("")
-
-    lines.append(f"## Cohort performance (CAC × volume, benchmark = `{args.benchmark}`)")
-    lines.append("")
-    if scored:
-        for r in scored:
-            tag = f" — {r['causal_note']}" if r["causal_note"] else ""
-            lines.append(f"### {r['cluster']} — {r['quadrant']}{tag}")
-            lines.append(f"- Cost: {r['cost']} ({fmt_delta(r['cost_change_pct'])} vs. comparison)")
-            lines.append(f"- {primary_conversion} conversions: {r['conversions']} ({fmt_delta(r['conversions_change_pct'])})")
-            lines.append(f"- CAC: {r['cac']} ({fmt_delta(r['cac_change_pct'])})")
-            lines.append(f"- Campaigns in cohort: {r['campaign_count']}")
-            lines.append(f"- **Recommended action: {r['suggested_action']}**")
-            lines.append("")
-            lines.extend(render_campaign_lines(campaigns_by_cluster.get(r["cluster"], []), primary_conversion))
-            lines.append("")
-    else:
-        lines.append("_No cohorts scored this period — see insufficient-data section below._")
-        lines.append("")
-
-    stars = [r for r in scored if r["quadrant"] == "Star"]
-    if stars:
-        lines.append("## What's working")
-        lines.append("")
-        for r in stars:
-            lines.append(f"- **{r['cluster']}** is a Star: CAC {r['cac']} at {r['conversions']} conversions, both clearing benchmark.")
-        lines.append("")
-
-    lines.append("## Insufficient data")
-    lines.append("")
-    if insufficient:
-        for r in insufficient:
-            lines.append(f"- {r['cluster']}: {r['conversions']} {primary_conversion} conversions (floor is {min_conversions}), cost {r['cost']}")
-            lines.extend(render_campaign_lines(campaigns_by_cluster.get(r["cluster"], []), primary_conversion))
-    else:
-        lines.append("_None — every cohort cleared the floor._")
-    lines.append("")
-
-    lines.append("## Excluded from scoring")
-    lines.append("")
-    if excluded:
-        for r in excluded:
-            lines.append(f"- {r['cluster']}: cost {r['cost']}, {r['conversions']} {primary_conversion} conversions (raw data only, not quadrant-classified)")
-            lines.extend(render_campaign_lines(campaigns_by_cluster.get(r["cluster"], []), primary_conversion))
-    else:
-        lines.append("_None configured._")
-    lines.append("")
-
-    return "\n".join(lines)
 
 
 if __name__ == "__main__":

@@ -42,7 +42,10 @@ Each project/account has its own config file under `configs/`
 - For narrative-style reports: state period vs. comparison period
   explicitly, and structure output as: what changed → observed/
   expected impact → what's working → recommended next steps
-  (scale / cut / edit / launch)
+  (scale / cut / edit / launch). Exception: `analyze_campaign_performance.py`
+  (v2) uses its own 3-section structure instead — What was done / What
+  happened with performance / Next steps — see the Scripts entry below and
+  its module docstring
 
 ## Known technical notes (Google Ads data handling)
 - Always filter by `metrics.impressions > 0` at the query level (not
@@ -339,35 +342,76 @@ Each project/account has its own config file under `configs/`
   surfaced across this project, and its distinction from `new_demand`
   was never clear. The remaining three signals (`new_demand`,
   `underexploited`, `rising_trend`) are considered sufficient
-- **`change_event` (the Google Ads change-log resource) — confirmed live
-  2026-09-21** via `metadata_get_resource_metadata` plus live pulls
-  against this account, ahead of any script in this repo actually using
-  it (see `claude/performance-report-v2`, not yet merged here, for the
-  consumer). Selectable/filterable fields: `change_date_time`,
-  `change_resource_type`, `resource_change_operation`, `campaign`,
-  `ad_group`, `changed_fields`, `old_resource`, `new_resource`,
-  `user_email`, `client_type`, `resource_name`. Sortable: only
-  `change_date_time`, `change_resource_type`, `resource_change_operation`,
-  `user_email` — **not** `resource_name`, the same pagination gotcha as
-  `search_term_view` (cursor on `change_date_time DESC`, dedupe by
-  `resource_name` on ties). Retention is a rolling **~29-day lookback from
-  query time** — a start date exactly 30 days back is rejected
-  ("requested start date is too old") — independent of whatever analysis
-  period is being examined, so a change-log pull is only ever possible
-  when that period overlaps roughly the trailing month; this is the
-  retrospective/forward-only answer: retrospective, but hard-capped to
-  that trailing window, never further back. `LIMIT` must be ≤ 10000, per
-  the connector's own tool hint. Granularity: `change_event.campaign`
-  links a campaign-scoped change; `change_event.ad_group` links an
-  ad-group-scoped one (ad/ad_group/ad_group_ad/ad_group_criterion-level
-  changes) — there is no separate keyword/criterion identifier field, so
-  a specific keyword change is only distinguishable via
-  `changed_fields`/`old_resource`/`new_resource` on an
-  `AD_GROUP_CRITERION`-typed event, not a dedicated column. Confirmed
-  live on this account: `ASSET` CREATE events dominate day-to-day (no
-  `campaign`/`ad_group` link), alongside real `CAMPAIGN` (status),
-  `CAMPAIGN_BUDGET` (amountMicros), etc. changes with those links
-  populated.
+- **`analyze_campaign_performance.py` v2 architecture (2026-09-21)**: the
+  script no longer renders a markdown narrative itself - it emits one
+  structured JSON file (`what_was_done` / `performance` / `next_steps`,
+  mirroring the report's 3-section structure) plus the same
+  `-cohorts.csv`/`-campaigns.csv` backups as before. The deterministic,
+  reproducible math (quadrant classification, before/after deltas,
+  account/cohort/campaign rollups) stays in Python; the narrative prose
+  itself is composed by Claude Code reading that JSON during the
+  `/performance-report` session, not generated inside the script via an
+  embedded LLM call. `performance.account` is a new addition (v1 only had
+  cohort/campaign levels) and is always a true account total, including
+  `exclude_from_scoring` clusters - unlike the scored cohort/campaign peer
+  groups, which exclude them. Two real bugs found and fixed 2026-09-21 in
+  a parallel live-verification session (details reported back, applied
+  here since that session's own uncommitted edits lived only in its local
+  worktree and were never pushed): (1) `campaign.start_date_time` comes
+  back as a full datetime ("2025-06-26 14:12:39"), not a bare date -
+  `parse_iso_date()` now takes the date part before parsing, where it
+  used to reject every real value and silently push every campaign into
+  `campaign_age_status()`'s "unknown" bucket; (2) see "Change-log schema"
+  below for the `change_event` wiring. STILL NOT LIVE-VERIFIED end-to-end
+  from *this* session: exercised only against hand-built synthetic CSVs
+  (all three benchmark modes, single-campaign-cohort fallback, the fixed
+  `--changes`/correlation-flags path with the confirmed schema) - the
+  parallel session did report a live PASS on the pre-schema-fix version
+  (all 3 benchmark modes, account rollup, CAC/quadrant/causal-note/tCPA
+  math, hand-verified against a real pull), but the change_event wiring
+  and the start_date_time fix specifically have only been synthetic-
+  tested here, not run against a live pull yet - confirm both once MCP
+  access lines up with a fresh run of this exact code.
+- **Change-log schema (`change_event`, confirmed 2026-09-21)**: confirmed
+  live via `metadata_get_resource_metadata` + real pulls in a parallel
+  verification session (this session's own Google Ads MCP Connector was
+  unavailable throughout, consistent with this project's one-session-at-
+  a-time MCP auth). Retrospective, but hard-capped to a **rolling ~29-day
+  window from query time** (a start date exactly 30 days back is
+  rejected: "requested start date is too old") - independent of whatever
+  `--period-start`/`--period-end` a report passes, so a change-log pull
+  is only possible when the analysis period overlaps roughly the
+  trailing month. `LIMIT` must be ≤ 10000, per the connector's own tool
+  hint. Fields: `change_date_time`, `change_resource_type`,
+  `resource_change_operation`, `campaign`, `ad_group`, `changed_fields`,
+  `old_resource`, `new_resource`, `user_email`, `client_type`,
+  `resource_name`. Sortable only on `change_date_time`/
+  `change_resource_type`/`resource_change_operation`/`user_email` - not
+  `resource_name`, same pagination gotcha as `search_term_view`.
+  Granularity: campaign-scoped changes carry a non-empty `campaign`
+  field; ad-group/ad/keyword-scoped changes carry only `ad_group` (no
+  campaign field) - there's no dedicated keyword/criterion field, so a
+  specific keyword change is only identifiable via `changed_fields`/
+  `old_resource`/`new_resource` on an `AD_GROUP_CRITERION`-typed event.
+  Confirmed live on this account: `ASSET` CREATE events dominate
+  day-to-day (no `campaign`/`ad_group` link), alongside real `CAMPAIGN`
+  (status), `CAMPAIGN_BUDGET` (amountMicros), etc. changes with those
+  links populated.
+  `analyze_campaign_performance.py`'s `build_correlation_flags()` now
+  does real matching (previously a stub) - `load_change_events()` reads
+  this confirmed schema directly (previously a generic column guess) and
+  `changes_in_window()` filters to `[--comparison-start, --period-end]`
+  before matching. **Real, documented limitation, not an oversight**:
+  correlation only covers campaign-scoped changes - ad-group/ad/keyword-
+  scoped changes still appear in `what_was_done`'s raw change list but
+  aren't matched to any cluster/campaign, since this script has no
+  ad_group → campaign mapping wired in (a different join than the
+  search-term scripts already do, for a different reason). `--changes`
+  is still how the script receives change data (it has no MCP access
+  itself, same as every other script here) - `/performance-report`'s job
+  is to do the live pull and hand it a CSV in the confirmed shape; that
+  live-pull wiring in the command itself is documented but not yet run
+  end-to-end (see the v2-architecture bullet above).
 
 ## Scripts
 - `analyze_wasted_spend.py` — search-term waste analysis
@@ -382,15 +426,24 @@ Each project/account has its own config file under `configs/`
   suggestion (Added/Excluded-aware, see Known technical notes), and
   surfaces real demand for tracked countries with no dedicated campaign yet
   (`--config configs/<project>.yaml --input file.csv --campaigns file.csv [--output file.csv]`)
-- `analyze_campaign_performance.py` — campaign performance narrative report
-  (v1, Ads-only): cohort (destination cluster) and nested campaign-level
-  CAC × volume quadrant classification against a switchable benchmark
-  (cluster/account/target), a period-proportional insufficient-data floor
-  that splits low-volume campaigns into new/stagnant/unknown-age, a
-  causal-note layer (conversion rate vs. account average + Lost IS)
-  explaining *why* alongside each quadrant label, and a per-campaign tCPA
-  candidacy recommendation - output as a markdown narrative + CSV backups
-  (`--config configs/<project>.yaml --period file.csv --period-start YYYY-MM-DD --period-end YYYY-MM-DD --comparison file.csv --comparison-start YYYY-MM-DD --comparison-end YYYY-MM-DD [--benchmark cluster|account|target] [--target file.csv --target-start YYYY-MM-DD --target-end YYYY-MM-DD] [--output file.md]`)
+- `analyze_campaign_performance.py` — campaign performance report (v2,
+  Ads-only, structured-findings architecture - see Known technical notes):
+  account-level, cohort (destination cluster), and nested campaign-level
+  before/after rollups; CAC × volume quadrant classification against a
+  switchable benchmark (cluster/account/target); a period-proportional
+  insufficient-data floor that splits low-volume campaigns into
+  new/stagnant/unknown-age; a causal-note layer (conversion rate vs.
+  account average + Lost IS) explaining *why* alongside each quadrant
+  label; a per-campaign tCPA candidacy recommendation; and scale/cut/edit/
+  top-by-metric next-step rankings. Emits one structured JSON file (no
+  markdown narrative - that's composed by Claude Code from the JSON, see
+  `/performance-report`) plus `-cohorts.csv`/`-campaigns.csv` backups. An
+  optional `--changes` CSV (confirmed `change_event` schema) populates
+  the "what was done" section and drives real `correlation_flags`
+  matching for campaign-scoped changes - see Known technical notes'
+  "Change-log schema" for the field list and the ad-group-scope
+  limitation
+  (`--config configs/<project>.yaml --period file.csv --period-start YYYY-MM-DD --period-end YYYY-MM-DD --comparison file.csv --comparison-start YYYY-MM-DD --comparison-end YYYY-MM-DD [--benchmark cluster|account|target] [--target file.csv --target-start YYYY-MM-DD --target-end YYYY-MM-DD] [--changes file.csv] [--output file.json]`)
 - `ads_common.py` — shared helpers (header-row detection, numeric
   cleanup, cluster/brand/intent/topic/quadrant matching) used by the
   scripts above
@@ -406,3 +459,54 @@ Each project/account has its own config file under `configs/`
   underexploited/rising-trend signals. It is never part of a default or
   combined analysis; a generic "run the analysis"/"give me a report"
   request means `/analyze-waste` alone, not this command bundled in too
+- `/performance-report` — runs the full campaign performance report
+  pipeline end-to-end and composes the narrative from the script's
+  structured JSON output. Takes the period to analyze and what to
+  compare it against in **plain language** (e.g. "compare September to
+  August", "this quarter vs the same quarter last year"), not raw
+  `--period-start`/`--period-end` flags - the command parses that into
+  real dates itself before invoking the script (see its own file for the
+  exact resolution rules and defaults). See Planned section below re: a
+  shared natural-language-to-dates helper across commands.
+
+## Planned / known gaps
+Deliberately deferred work, tracked here so it isn't lost or silently
+reattempted from scratch:
+
+- **Natural-language period parsing, currently per-command**:
+  `/performance-report` parses phrases like "September vs August" into
+  date-flag arguments itself, ad hoc, in its own command file. This same
+  pattern would benefit `/analyze-waste` and `/find-opportunities` too
+  (both currently take a window only via inline override text in the
+  request, parsed less formally). Not yet extracted into a shared
+  helper/convention - flagged 2026-09-21, not built. If a third command
+  needs the same parsing, extract it then rather than duplicating a third
+  time.
+- **`/performance-report`'s "Next steps" section should eventually
+  reference `/find-opportunities` signals** (new_demand, underexploited,
+  rising_trend) — e.g. a cluster flagged for scaling that also has
+  underexploited search-term headroom is a stronger signal than either
+  alone. Deferred until `/find-opportunities`' output is trusted enough
+  (its own signals are themselves partly gated on unverified term_status
+  - see Known technical notes) to build on with confidence.
+- **GA4 ecommerce item-level data cross-reference**: cross-referencing
+  GA4 ecommerce items (tagged by direction — PL-UA, PL-UK, PL-PL, etc.)
+  against search-demand potential, to strengthen `/performance-report`'s
+  scaling conclusions with actual revenue/margin signal instead of Ads-
+  only conversion count. Not started - no GA4 MCP access confirmed yet,
+  no schema investigation done.
+- **`change_event` live-pull wiring into `/performance-report` itself**:
+  the resource's schema is confirmed and `analyze_campaign_performance.py`
+  consumes it correctly (see Known technical notes' "Change-log schema"),
+  but `/performance-report`'s step 4 (checking the ~29-day retention
+  window, running the actual MCP pull, building the `--changes` CSV) is
+  documented, not yet exercised end-to-end against a live account - do
+  that before treating "What was done" as fully working, not just its
+  schema as confirmed.
+- **Ad-group/ad/keyword-scoped change correlation**: `correlation_flags`
+  only matches campaign-scoped `change_event` rows (see "Change-log
+  schema") - an ad-group→campaign mapping would extend real correlation
+  coverage to ad copy edits and keyword-level changes, the way the
+  search-term scripts already join ad_group→campaign for a different
+  reason. Not built - these changes currently only surface as unmatched
+  rows in `what_was_done`'s raw list, for Claude Code to notice in prose.
