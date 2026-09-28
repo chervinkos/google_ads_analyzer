@@ -305,8 +305,8 @@ Each project/account has its own config file under `configs/`
   both fire correctly on real Excluded/Added rows, `underexploited`
   correctly excludes every Added-anywhere term (verified against a real
   high-conversion Added term that would otherwise obviously qualify), and
-  `new_demand`/`rising_trend` correctly keep Excluded terms as context
-  instead of filtering them. `ads_common.normalize_term_status()`'s
+  `new_demand` correctly keeps Excluded terms as context instead of
+  filtering them. `ads_common.normalize_term_status()`'s
   tolerant substring matching ("add"/"exclud") is no longer a hedge
   against an unconfirmed field - it stays as reasonable defensive parsing
   regardless. Handling differs by script/signal, not a blanket filter:
@@ -324,8 +324,7 @@ Each project/account has its own config file under `configs/`
     - `analyze_search_opportunities.py`: a real filter for
       `underexploited` only (a term already Added, in ANY campaign it
       appears in, isn't underexploited by definition - excluded from
-      that signal entirely). Never filters `new_demand` or
-      `rising_trend`. Its output column is `in_account` - a plain
+      that signal entirely). Never filters `new_demand`. Its output column is `in_account` - a plain
       boolean (True if Added or Added/Excluded in any campaign the term
       appears in), not a representative term_status string. A status
       picked from whichever campaign occurrence had the highest cost was
@@ -340,8 +339,13 @@ Each project/account has its own config file under `configs/`
   (`ads_common.match_intents`) were removed 2026-09-20 - it never had a
   clearly defined classification rule, no real business use case
   surfaced across this project, and its distinction from `new_demand`
-  was never clear. The remaining three signals (`new_demand`,
-  `underexploited`, `rising_trend`) are considered sufficient
+  was never clear. `rising_trend` was then removed 2026-09-28 as well
+  (along with its `--min-trend-clicks`/`--trend-growth-pct` args, the
+  `baseline_clicks`/`growth_pct` output columns, and the now-unused
+  `--baseline` input): it answers a different kind of question (trend
+  over time, independent of coverage/Added status) than the other two
+  and wasn't worth keeping as part of this tool for now. Only
+  `new_demand` and `underexploited` remain.
 - **`analyze_campaign_performance.py` v2 architecture (2026-09-21)**: the
   script no longer renders a markdown narrative itself - it emits one
   structured JSON file (`what_was_done` / `performance` / `next_steps`,
@@ -417,9 +421,9 @@ Each project/account has its own config file under `configs/`
 - `analyze_wasted_spend.py` — search-term waste analysis
   (`--config configs/<project>.yaml --input file.csv [--min-clicks N] [--min-cost N] [--output file.csv]`)
 - `analyze_search_opportunities.py` — search-term opportunity/pattern
-  discovery: new-demand, underexploited high-performer, and rising-trend
-  signals, Added/Excluded-aware per signal (see Known technical notes)
-  (`--config configs/<project>.yaml --trailing file.csv --baseline file.csv --keywords file.csv [--output file.csv]`)
+  discovery: new-demand and underexploited high-performer signals,
+  Added/Excluded-aware per signal (see Known technical notes)
+  (`--config configs/<project>.yaml --trailing file.csv --keywords file.csv [--output file.csv]`)
 - `analyze_topic_alignment.py` — content-based topic (country/destination)
   classification vs. campaign-based clusters: flags mismatches (a term's
   content says one country, its campaign says another) with a re-home
@@ -456,7 +460,7 @@ Each project/account has its own config file under `configs/`
   end-to-end using the active config's defaults, with inline overrides
   supported. **Standalone and opt-in** — run only when explicitly asked
   for by name or by a request specifically about new-demand/
-  underexploited/rising-trend signals. It is never part of a default or
+  underexploited signals. It is never part of a default or
   combined analysis; a generic "run the analysis"/"give me a report"
   request means `/analyze-waste` alone, not this command bundled in too
 - `/performance-report` — runs the full campaign performance report
@@ -483,8 +487,8 @@ reattempted from scratch:
   needs the same parsing, extract it then rather than duplicating a third
   time.
 - **`/performance-report`'s "Next steps" section should eventually
-  reference `/find-opportunities` signals** (new_demand, underexploited,
-  rising_trend) — e.g. a cluster flagged for scaling that also has
+  reference `/find-opportunities` signals** (new_demand, underexploited)
+  — e.g. a cluster flagged for scaling that also has
   underexploited search-term headroom is a stronger signal than either
   alone. Deferred until `/find-opportunities`' output is trusted enough
   (its own signals are themselves partly gated on unverified term_status

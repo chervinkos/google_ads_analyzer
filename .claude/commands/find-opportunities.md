@@ -1,8 +1,8 @@
 Run the full search-term opportunity/pattern discovery pipeline end-to-end.
 
 **Standalone and opt-in.** Run this only when explicitly requested — by
-name, or by a request specifically about new-demand/underexploited/
-rising-trend signals. It is not part of any default or combined
+name, or by a request specifically about new-demand/underexploited
+signals. It is not part of any default or combined
 analysis: a general "run the analysis" or "give me a report" request
 means `/analyze-waste` alone, never this command bundled in on top,
 unless the user separately asks for opportunity discovery too.
@@ -18,8 +18,6 @@ Pipeline:
    `client_account_id`. Via the Google Ads MCP Connector, pull:
    - a trailing-window search-term report (default: last 30 days, unless
      the user specifies a different window)
-   - a baseline-window search-term report immediately preceding it
-     (default: the 30 days before the trailing window)
    - the current active keyword list for the account
 
    `search_search` has no offset/page_token — paginate per CLAUDE.md's
@@ -32,18 +30,18 @@ Pipeline:
    required `advertising_channel_type = 'PERFORMANCE_MAX'` campaign
    filter — this resource is not PMax-exclusive and will double-count
    Search-campaign rows if merged in unfiltered) and still needs merging
-   in here too, for both the trailing and baseline pulls. Until then,
+   in here too. Until then,
    opportunity signals from PMax traffic are missing; flag this in the
    summary rather than silently omitting it. When this merge is built,
    also pull `segments.search_term_targeting_status` alongside it — the
    PMax path's confirmed Added/Excluded equivalent (see step 3 below and
    CLAUDE.md's "Known technical notes"; `campaign_search_term_view.status`
    does not exist as a field, don't reach for it).
-2. Map ad groups to their campaign names for both search-term pulls
+2. Map ad groups to their campaign names for the search-term pull
    (fetch any ad groups missing from the initial batch pull).
-3. Build three CSVs from the pulled data: trailing search terms, baseline
-   search terms (each with Search term, Campaign, Ad group, Clicks, Cost,
-   Conversions), and the active keyword list (with a Keyword column).
+3. Build two CSVs from the pulled data: trailing search terms (with
+   Search term, Campaign, Ad group, Clicks, Cost, Conversions), and the
+   active keyword list (with a Keyword column).
    Also include the term's Added/Excluded status, confirmed available on
    both paths (see CLAUDE.md's "Known technical notes"): pull
    `search_term_view.status` for Search rows and (once the PMax merge
@@ -58,16 +56,14 @@ Pipeline:
    writeup): a PMax row normalizing to "added" or "added_excluded" would
    be unexpected (PMax has no keywords) and worth a second look.
 4. Run:
-   `python3 analyze_search_opportunities.py --config configs/<project>.yaml --trailing <trailing CSV> --baseline <baseline CSV> --keywords <keyword-list CSV>`
+   `python3 analyze_search_opportunities.py --config configs/<project>.yaml --trailing <trailing CSV> --keywords <keyword-list CSV>`
    using script defaults, unless the user's request specifies different
-   thresholds (`--min-conversions`, `--max-cac-ratio`, `--min-trend-clicks`,
-   `--trend-growth-pct`).
+   thresholds (`--min-conversions`, `--max-cac-ratio`).
 5. The script writes one CSV (sorted by cost descending) with every
-   flagged term tagged by signal type — `new_demand`, `underexploited`,
-   `rising_trend` (a term can carry more than one) — and a suggested
-   action per row. Added/Excluded status genuinely filters
+   flagged term tagged by signal type — `new_demand`, `underexploited`
+   (a term can carry both) — and a suggested action per row. Added/Excluded status genuinely filters
    `underexploited` only (a term already Added isn't underexploited by
-   definition); `new_demand`/`rising_trend` are never filtered by it. The
+   definition); `new_demand` is never filtered by it. The
    output's `in_account` column is a plain boolean — True if the term is
    Added anywhere across any campaign it appears in, matching exactly
    what the `underexploited` filter itself checks — rather than a

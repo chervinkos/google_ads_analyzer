@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """Search-term opportunity / pattern discovery.
 
-Compares a trailing window against a baseline window (plus the current
-active keyword list) to flag search terms worth acting on, across three
+Checks a trailing-window search-term report (plus the current active
+keyword list) to flag search terms worth acting on, across two
 independent signal types:
 
   - new_demand:      falls to the catch-all cluster AND doesn't match any
                       other cluster's keywords by content either
   - underexploited:  strong conversion rate / low CAC, not yet an active
                       keyword
-  - rising_trend:    meaningfully higher volume trailing vs. baseline
 
-A term can carry multiple signals at once; all are reported together with
+A term can carry both signals at once; all are reported together with
 a suggested action.
 
 Added/Excluded status (term_status - live-verified 2026-09-21 on the
@@ -21,7 +20,7 @@ Known technical notes; a fresh live re-check of both paths together is
 still pending) genuinely filters underexploited only - a term already
 Added as a keyword (in ANY campaign it appears in) isn't underexploited
 by definition, so it's excluded from that signal entirely. new_demand
-and rising_trend are never filtered by it.
+is never filtered by it.
 
 The output carries this as `in_account` - a plain boolean, True if the
 term is Added or Added/Excluded in any campaign it appears in, False
@@ -39,9 +38,9 @@ unaffected - the column is optional input, not a hard requirement.
 
 Usage:
     analyze_search_opportunities.py --config configs/<project>.yaml \\
-        --trailing trailing_search_terms.csv --baseline baseline_search_terms.csv \\
+        --trailing trailing_search_terms.csv \\
         --keywords current_keywords.csv [--output file.csv]
-        [--min-conversions N] [--max-cac-ratio R] [--min-trend-clicks N] [--trend-growth-pct P]
+        [--min-conversions N] [--max-cac-ratio R]
 """
 import argparse
 import sys
@@ -53,14 +52,12 @@ TERM_COLUMNS = ["search_term", "campaign", "clicks", "cost", "conversions", "ter
 OUTPUT_FIELDS = [
     "search_term", "campaign", "cluster", "brand_term", "in_account",
     "clicks", "cost", "conversions", "cpa",
-    "baseline_clicks", "growth_pct",
     "signals", "suggested_action",
 ]
 
 SUGGESTED_ACTIONS = {
     "new_demand": "Consider a new cluster/campaign for this term",
     "underexploited": "Add as an exact-match keyword",
-    "rising_trend": "Increase bid/budget for this term",
 }
 
 
@@ -68,17 +65,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="Path to configs/<project>.yaml")
     parser.add_argument("--trailing", required=True, help="Trailing-window search-term CSV")
-    parser.add_argument("--baseline", required=True, help="Baseline-window search-term CSV")
     parser.add_argument("--keywords", required=True, help="Current active keyword-list export CSV")
     parser.add_argument("--output", default=None, help="Output CSV path (default: <project>-opportunities.csv)")
     parser.add_argument("--min-conversions", type=float, default=1.0,
                          help="Minimum trailing conversions to qualify as underexploited (default 1)")
     parser.add_argument("--max-cac-ratio", type=float, default=0.5,
                          help="Flag as underexploited when CPA <= this fraction of the trailing account-average CPA (default 0.5)")
-    parser.add_argument("--min-trend-clicks", type=float, default=5.0,
-                         help="Minimum trailing clicks to qualify for the rising_trend signal (default 5)")
-    parser.add_argument("--trend-growth-pct", type=float, default=50.0,
-                         help="Minimum %% growth trailing vs. baseline clicks to qualify as rising_trend (default 50)")
     return parser.parse_args()
 
 
@@ -149,15 +141,12 @@ def main():
     output_path = args.output or f"{project_name}-opportunities.csv"
 
     trailing_records = common.load_table(args.trailing)
-    baseline_records = common.load_table(args.baseline)
     keyword_records = common.load_table(args.keywords)
 
     # Trailing is the window being analyzed, so it must have both columns
-    # and data. Baseline and the active-keyword list may legitimately be
-    # empty (e.g. a brand-new term has no baseline history) - treat an
-    # empty table there as "nothing to compare against", not an error.
+    # and data. The active-keyword list may legitimately be empty - treat
+    # an empty table there as "no active keywords", not an error.
     trailing_cols = resolve_term_columns(trailing_records, args.trailing)
-    baseline_cols = common.resolve_columns(baseline_records[0].keys(), TERM_COLUMNS) if baseline_records else {}
 
     active_keywords = set()
     if keyword_records:
@@ -171,7 +160,6 @@ def main():
         }
 
     trailing_terms = aggregate_by_term(trailing_records, trailing_cols)
-    baseline_terms = aggregate_by_term(baseline_records, baseline_cols) if baseline_records else {}
 
     converting = [t for t in trailing_terms.values() if t["conversions"] > 0]
     if converting:
@@ -194,13 +182,6 @@ def main():
         is_brand = common.matches_any_keyword(search_term, brand_keywords)
         added_anywhere = term.get("added_anywhere", False)
 
-        baseline = baseline_terms.get(key)
-        baseline_clicks = baseline["clicks"] if baseline else 0.0
-        if baseline_clicks > 0:
-            growth_pct = ((clicks - baseline_clicks) / baseline_clicks) * 100
-        else:
-            growth_pct = None
-
         signals = []
 
         if cluster in catch_all_names and not common.matches_any_keyword(search_term, cluster_keywords):
@@ -211,12 +192,6 @@ def main():
                 and search_term.lower() not in active_keywords
                 and not added_anywhere):
             signals.append("underexploited")
-
-        is_new_with_volume = baseline_clicks == 0 and clicks >= args.min_trend_clicks
-        is_grown = (baseline_clicks > 0 and clicks >= args.min_trend_clicks
-                    and growth_pct is not None and growth_pct >= args.trend_growth_pct)
-        if is_new_with_volume or is_grown:
-            signals.append("rising_trend")
 
         if not signals:
             continue
@@ -234,8 +209,6 @@ def main():
             "cost": round(cost, 2),
             "conversions": conversions,
             "cpa": round(cpa, 2) if cpa is not None else "",
-            "baseline_clicks": baseline_clicks,
-            "growth_pct": round(growth_pct, 1) if growth_pct is not None else ("new" if is_new_with_volume else ""),
             "signals": ";".join(signals),
             "suggested_action": "; ".join(SUGGESTED_ACTIONS[s] for s in signals),
         })
@@ -245,7 +218,6 @@ def main():
 
     print(f"Opportunity discovery for {project_name}")
     print(f"  Trailing: {args.trailing} ({len(trailing_terms)} unique terms)")
-    print(f"  Baseline: {args.baseline} ({len(baseline_terms)} unique terms)")
     print(f"  Active keywords: {args.keywords} ({len(active_keywords)} keywords)")
     print(f"  Flagged rows: {len(flagged)}")
     print("  Breakdown by signal type:")
