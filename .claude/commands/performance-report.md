@@ -41,7 +41,7 @@ Pipeline:
      that would misalign quarter boundaries).
    - "last 30 days vs the 30 days before that" / no period specified at
      all → default: period = trailing 30 days ending today, comparison =
-     the 30 days immediately before that (same default `/find-opportunities`
+     the 30 days immediately before that (same default `/search-term-opportunities`
      uses for its trailing/baseline windows).
    - Any other relative phrasing ("last week vs the week before", "Q1 vs
      Q2") → resolve the same way: two equal-length, non-overlapping,
@@ -146,7 +146,7 @@ Pipeline:
      and `suggested_action` where relevant, and flag insufficient-data
      cohorts/campaigns (`status: insufficient_data`, with their
      `age_status`) separately rather than silently omitting them.
-   - Do NOT reference `/find-opportunities` signals or GA4 ecommerce data
+   - Do NOT reference `/search-term-opportunities` signals or GA4 ecommerce data
      in Next Steps yet - both are explicitly deferred, see CLAUDE.md's
      Planned section.
 7. Mention the JSON/CSV file paths at the end so the user can open the raw

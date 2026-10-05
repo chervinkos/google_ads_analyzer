@@ -493,7 +493,7 @@ Each project/account has its own config file under `configs/`
 ## Slash commands
 - `/analyze-waste` — runs the full waste-analysis pipeline end-to-end
   using the active config's defaults, with inline overrides supported
-- `/find-opportunities` — runs the full opportunity-discovery pipeline
+- `/search-term-opportunities` — runs the full opportunity-discovery pipeline
   end-to-end using the active config's defaults, with inline overrides
   supported. **Standalone and opt-in** — run only when explicitly asked
   for by name or by a request specifically about new-demand/
@@ -517,17 +517,17 @@ reattempted from scratch:
 - **Natural-language period parsing, currently per-command**:
   `/performance-report` parses phrases like "September vs August" into
   date-flag arguments itself, ad hoc, in its own command file. This same
-  pattern would benefit `/analyze-waste` and `/find-opportunities` too
+  pattern would benefit `/analyze-waste` and `/search-term-opportunities` too
   (both currently take a window only via inline override text in the
   request, parsed less formally). Not yet extracted into a shared
   helper/convention - flagged 2026-09-21, not built. If a third command
   needs the same parsing, extract it then rather than duplicating a third
   time.
 - **`/performance-report`'s "Next steps" section should eventually
-  reference `/find-opportunities` signals** (new_demand, underexploited)
+  reference `/search-term-opportunities` signals** (new_demand, underexploited)
   — e.g. a cluster flagged for scaling that also has
   underexploited search-term headroom is a stronger signal than either
-  alone. Deferred until `/find-opportunities`' output is trusted enough
+  alone. Deferred until `/search-term-opportunities`' output is trusted enough
   (its own signals are themselves partly gated on unverified term_status
   - see Known technical notes) to build on with confidence.
 - **GA4 ecommerce item-level data cross-reference**: cross-referencing
