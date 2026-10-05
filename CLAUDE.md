@@ -346,6 +346,41 @@ Each project/account has its own config file under `configs/`
   over time, independent of coverage/Added status) than the other two
   and wasn't worth keeping as part of this tool for now. Only
   `new_demand` and `underexploited` remain.
+- **`new_demand` is content-based, via the shared topic engine (2026-10-05)** —
+  it was previously gated on the term's single highest-cost campaign
+  (`aggregate_by_term` keeps one campaign "for tagging") being in the
+  catch-all cluster AND the term's text matching none of the cluster
+  patterns. That gate existed unchanged since the first commit with no
+  design rationale recorded anywhere, and `underexploited` had already been
+  fixed the other way ("Added anywhere", `3fc01f5`). Two decisions replaced
+  it, shipped together: (A) no single top-cost campaign decides anything,
+  and (B) the script's own `cluster_keywords`/`catch_all_names` matching is
+  retired for this purpose in favor of `ads_common.classify_topic()`, the
+  same engine `analyze_topic_alignment.py` uses (resolving the old overlap
+  of two unreconciled keyword lists - `clusters[].match_campaign_name` vs.
+  `topic_keywords` - for the same question). `new_demand` is exactly
+  `classify_topic() == "tracked_no_campaign"`: one topic matched and no
+  ENABLED campaign serves it. `single` (a live campaign serves the topic -
+  if the term runs in the wrong campaign that's the alignment script's
+  re-home signal), `ambiguous` (2+ topics) and `none` (no topic matched, so
+  nothing can be said about coverage) are not new demand. Because the
+  classification depends only on the term's text and the live campaign
+  list, it is independent of which campaign(s) the term ran in. Notable
+  behavior changes: unclassified generic terms (`none`) are no longer
+  flagged just for sitting in a catch-all campaign, and `new_demand` now
+  only covers topics defined in `topic_keywords` - a country with no topic
+  entry can't be detected; also no volume/cost threshold exists (a
+  zero-click term can qualify), unchanged from before. `--campaigns` (a
+  live campaign list, name + status, pulled fresh via MCP) is now a
+  required input: `classify_topic()` cannot tell `single` from
+  `tracked_no_campaign` without it, and an empty/stale list silently
+  relabels every core topic as new demand (the script warns on stderr when
+  no campaign is ENABLED, or none maps to a core topic's cluster). That
+  pull is a deliberate exception to the `metrics.impressions > 0` rule
+  above: coverage depends on a campaign being live, not on having had
+  impressions in the window. The `cluster`/`campaign` output columns remain
+  descriptive tags of the top-cost campaign only and feed no signal.
+  Tests: `python3 -m unittest discover -s tests -v`
 - **`analyze_campaign_performance.py` v2 architecture (2026-09-21)**: the
   script no longer renders a markdown narrative itself - it emits one
   structured JSON file (`what_was_done` / `performance` / `next_steps`,
@@ -421,9 +456,11 @@ Each project/account has its own config file under `configs/`
 - `analyze_wasted_spend.py` — search-term waste analysis
   (`--config configs/<project>.yaml --input file.csv [--min-clicks N] [--min-cost N] [--output file.csv]`)
 - `analyze_search_opportunities.py` — search-term opportunity/pattern
-  discovery: new-demand and underexploited high-performer signals,
-  Added/Excluded-aware per signal (see Known technical notes)
-  (`--config configs/<project>.yaml --trailing file.csv --keywords file.csv [--output file.csv]`)
+  discovery: new-demand (content-based topic coverage via
+  `ads_common.classify_topic`, not campaign-name matching) and
+  underexploited high-performer signals, Added/Excluded-aware per signal
+  (see Known technical notes)
+  (`--config configs/<project>.yaml --trailing file.csv --keywords file.csv --campaigns campaigns.csv [--output file.csv]`)
 - `analyze_topic_alignment.py` — content-based topic (country/destination)
   classification vs. campaign-based clusters: flags mismatches (a term's
   content says one country, its campaign says another) with a re-home

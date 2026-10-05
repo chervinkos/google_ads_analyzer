@@ -95,6 +95,11 @@ clusters:
 # mismatch/re-home signal (a term whose content says one country but whose
 # campaign says another) and its demand-discovery signal (real query volume
 # for a country the account doesn't yet serve at all).
+# Also the sole source for analyze_search_opportunities.py's new_demand
+# signal (via ads_common.classify_topic): a term is new demand when it matches
+# exactly one topic here and no ENABLED campaign serves that topic. A country
+# with no entry below can't be detected as new demand, and edits here change
+# both scripts.
 #
 # `cluster` links a topic to its corresponding clusters[] entry, for the 4
 # "core" destinations already served by a dedicated cluster (US/UK/UA/DE).

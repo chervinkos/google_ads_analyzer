@@ -19,6 +19,14 @@ Pipeline:
    - a trailing-window search-term report (default: last 30 days, unless
      the user specifies a different window)
    - the current active keyword list for the account
+   - the live campaign list (`campaign.name`, `campaign.status`) — every
+     status, every channel type (PMax included), pulled fresh this run and
+     never cached. `new_demand` needs it to know which topics have an
+     ENABLED campaign serving them; the script filters to ENABLED itself.
+     This is a deliberate exception to CLAUDE.md's "filter by
+     `metrics.impressions > 0`" rule: coverage depends on a campaign being
+     live, not on it having had impressions in the window, so don't select
+     metrics or filter on impressions for this query.
 
    `search_search` has no offset/page_token — paginate per CLAUDE.md's
    "Known technical notes" (cursor on `metrics.cost_micros` plus a
@@ -39,9 +47,10 @@ Pipeline:
    does not exist as a field, don't reach for it).
 2. Map ad groups to their campaign names for the search-term pull
    (fetch any ad groups missing from the initial batch pull).
-3. Build two CSVs from the pulled data: trailing search terms (with
-   Search term, Campaign, Ad group, Clicks, Cost, Conversions), and the
-   active keyword list (with a Keyword column).
+3. Build three CSVs from the pulled data: trailing search terms (with
+   Search term, Campaign, Ad group, Clicks, Cost, Conversions), the
+   active keyword list (with a Keyword column), and the live campaign list
+   (Campaign, Status columns).
    Also include the term's Added/Excluded status, confirmed available on
    both paths (see CLAUDE.md's "Known technical notes"): pull
    `search_term_view.status` for Search rows and (once the PMax merge
@@ -56,12 +65,23 @@ Pipeline:
    writeup): a PMax row normalizing to "added" or "added_excluded" would
    be unexpected (PMax has no keywords) and worth a second look.
 4. Run:
-   `python3 analyze_search_opportunities.py --config configs/<project>.yaml --trailing <trailing CSV> --keywords <keyword-list CSV>`
+   `python3 analyze_search_opportunities.py --config configs/<project>.yaml --trailing <trailing CSV> --keywords <keyword-list CSV> --campaigns <campaign-list CSV>`
    using script defaults, unless the user's request specifies different
    thresholds (`--min-conversions`, `--max-cac-ratio`).
 5. The script writes one CSV (sorted by cost descending) with every
    flagged term tagged by signal type — `new_demand`, `underexploited`
-   (a term can carry both) — and a suggested action per row. Added/Excluded status genuinely filters
+   (a term can carry both) — and a suggested action per row. `new_demand`
+   is content-based, the same engine as
+   `analyze_topic_alignment.py` (`ads_common.classify_topic`): it fires only when the term's text
+   matches exactly one `topic_keywords` topic that has no ENABLED campaign
+   serving it (`classify_topic()` = `tracked_no_campaign`). Terms that
+   match no topic (`none`), conflicting topics (`ambiguous`), or a topic
+   with a live campaign (`single` — a wrong-campaign term is
+   `analyze_topic_alignment.py`'s re-home signal, not new demand) are not flagged.
+   It does not depend on which campaign(s) the term ran in. The script
+   prints a per-label tally and warns on stderr if the campaign list looks
+   empty or stale — surface that warning to the user, don't ignore it.
+   Added/Excluded status genuinely filters
    `underexploited` only (a term already Added isn't underexploited by
    definition); `new_demand` is never filtered by it. The
    output's `in_account` column is a plain boolean — True if the term is

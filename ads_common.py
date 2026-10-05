@@ -315,18 +315,6 @@ def matches_any_keyword(text, keywords):
     return any(kw and re.search(kw, text, re.IGNORECASE) for kw in keywords)
 
 
-def flattened_cluster_keywords(clusters):
-    """All non-catch-all clusters' match_campaign_name patterns, flattened,
-    for content-based (not campaign-based) matching against search terms."""
-    keywords = []
-    for cluster in clusters:
-        match = cluster.get("match_campaign_name")
-        if match == "catch-all":
-            continue
-        keywords.extend(match if isinstance(match, list) else [match])
-    return [kw for kw in keywords if kw]
-
-
 def match_topics(text, topic_keywords):
     """Content-based topic detection: which topics' patterns appear in this
     text (typically a search term), independent of which cluster the term's
